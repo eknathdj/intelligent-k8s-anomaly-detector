@@ -1,0 +1,209 @@
+# ------- Global -------
+global:
+  clusterName: ""        # ArgoCD app-set fills this
+  environment: dev
+  cloudProvider: azure   # azure | aws | gcp
+
+# ------- Parent chart on/off ------
+kube-prometheus-stack:
+  enabled: true
+
+  # ---------- Prometheus ----------
+  prometheus:
+    prometheusSpec:
+      replicas: 1
+      retention: 14d
+      retentionSize: 50GB
+      ruleSelectorNilUsesHelmValues: false   # pick up our extra rules
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      scrapeConfigSelectorNilUsesHelmValues: false
+      enableAdminAPI: true
+      walCompression: true
+      additionalScrapeConfigs: []   # appended below
+
+      # Remote-write example (optional)
+      remoteWrite: []
+        # - url: https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-xxx/api/v1/remote_write
+        #   sigv4:
+        #     region: us-east-1
+
+      # Resource requests/limits
+      resources:
+        requests:
+          cpu: 500m
+          memory: 2Gi
+        limits:
+          cpu: 2000m
+          memory: 8Gi
+
+      # Node selector / tolerations
+      nodeSelector: {}
+      tolerations: []
+
+      # Persistence
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 50Gi
+            storageClassName: ""  # empty = cluster default
+
+    # Admin ingress (optional)
+    ingress:
+      enabled: false
+      ingressClassName: nginx
+      annotations: {}
+        # cert-manager.io/cluster-issuer: letsencrypt-prod
+      hosts:
+        - prometheus.example.com
+      tls: []
+        # - secretName: prometheus-tls
+        #   hosts: [prometheus.example.com]
+
+  # ---------- Alertmanager ----------
+  alertmanager:
+    enabled: true
+    config:
+      global:
+        resolve_timeout: 5m
+      route:
+        group_by: ["alertname", "cluster", "service"]
+        group_wait: 10s
+        group_interval: 10s
+        repeat_interval: 12h
+        receiver: "null"
+        routes:
+          - match:
+              severity: critical
+            receiver: pager
+            continue: true
+          - match:
+              severity: warning
+            receiver: slack
+      receivers:
+        - name: "null"
+        - name: pager
+          # pagerduty_configs:
+          # - service_key: ${PAGERDUTY_SERVICE_KEY}
+        - name: slack
+          # slack_configs:
+          # - api_url: ${SLACK_WEBHOOK}
+    ingress:
+      enabled: false
+      ingressClassName: nginx
+      hosts:
+        - alertmanager.example.com
+
+  # ---------- Grafana ----------
+  grafana:
+    enabled: true
+    replicas: 1
+    adminPassword: prom-operator # overwritten by external secret in prod
+    rbac:
+      pspEnabled: false
+    serviceMonitor:
+      enabled: true
+    # sidecar to pick up our dashboards
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        folder: /tmp/dashboards
+      datasources:
+        enabled: true
+        label: grafana_datasource
+    # Default datasources already created; we only add dashboards
+    ingress:
+      enabled: false
+      ingressClassName: nginx
+      hosts:
+        - grafana.example.com
+
+    # Resources
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # Persistence
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClassName: ""
+
+  # ---------- Kube-State-Metrics ----------
+  kube-state-metrics:
+    enabled: true
+
+  # ---------- Node-Exporter ----------
+  prometheus-node-exporter:
+    enabled: true
+
+  # ---------- Default Rules ----------
+  defaultRules:
+    create: true
+    rules:
+      alertmanager: true
+      etcd: true
+      general: true
+      k8s: true
+      kubeApiserver: true
+      kubePrometheus: true
+      kubernetesApps: true
+      kubernetesResources: true
+      kubernetesStorage: true
+      kubernetesSystem: true
+      network: true
+      node: true
+      prometheus: true
+      prometheusOperator: true
+
+  # ---------- Prometheus Operator ----------
+  prometheusOperator:
+    enabled: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+      limits:
+        cpu: 200m
+        memory: 200Mi
+
+# ------- Extra Prometheus rules & Grafana dashboards -------
+# They are shipped via templates so that they are picked up by label selectors
+extraRules:
+  enabled: true
+extraDashboards:
+  enabled: true
+
+# ------- Ingress for unified entry (optional) -------
+unifiedIngress:
+  enabled: false
+  ingressClassName: nginx
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    grafana: grafana.example.com
+    prometheus: prometheus.example.com
+    alertmanager: alertmanager.example.com
+  tls: []
+    # - secretName: monitoring-tls
+    #   hosts:
+    #     - grafana.example.com
+    #     - prometheus.example.com
+    #     - alertmanager.example.com
+
+# ------- Node selector / tolerations / affinity -------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ------- Extra manifests -------
+extraDeploy: []   # raw YAML strings rendered at the end

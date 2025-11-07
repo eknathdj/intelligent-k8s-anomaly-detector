@@ -1,0 +1,12 @@
+variable "namespace" {}
+variable "base_name" {}
+variable "tags" {}
+variable "image_repo" {}
+variable "image_tag" {}
+variable "replicas" {}
+variable "resources" {}
+variable "service_type" {}
+variable "ingress_enabled" {}
+variable "ingress_fqdn" {}
+variable "db_secret_name" {}
+variable "artifacts_secret_name" {}

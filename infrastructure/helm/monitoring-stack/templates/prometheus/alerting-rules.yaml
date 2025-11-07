@@ -1,0 +1,60 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "monitoring-stack.fullname" . }}-alerting
+  labels:
+    prometheus: kube-prometheus-stack
+    role: alert-rules
+    {{- include "monitoring-stack.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: anomaly_detection.alerts
+      interval: 30s
+      rules:
+        - alert: HighAnomalyScore
+          expr: anomaly_score > 0.95
+          for: 2m
+          labels:
+            severity: critical
+            team: sre
+          annotations:
+            summary: "Pod {{ $labels.pod }} anomaly score critical"
+            description: "Score = {{ $value }} on {{ $labels.pod }} in cluster {{ $labels.cluster }}"
+
+        - alert: AnomalyDetectorDown
+          expr: up{job="anomaly-detector"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Anomaly-detector API unreachable"
+
+        - alert: ModelLatencyHigh
+          expr: histogram_quantile(0.95, anomaly_inference_duration_seconds_bucket) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Model p95 latency > 500 ms"
+
+        - alert: TrainingJobFailed
+          expr: increase(kube_job_failed_count{job_name=~"anomaly-detector-training-.*"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ML training CronJob failed"
+
+    - name: infrastructure.predictive
+      interval: 30s
+      rules:
+        - alert: PredictedCPUHigh
+          expr: |
+            predict_linear(node_cpu_utilisation[1h], 3600) > 0.85
+          for: 5m
+          labels:
+            severity: info
+            forecast: "true"
+          annotations:
+            summary: "CPU forecasted to exceed 85 % within 1 h"
+            runbook_url: "https://wiki.example.com/runbooks/cpu-forecast"

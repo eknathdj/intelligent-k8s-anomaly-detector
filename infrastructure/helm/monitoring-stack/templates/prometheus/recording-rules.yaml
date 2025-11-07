@@ -1,0 +1,32 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "monitoring-stack.fullname" . }}-recording
+  labels:
+    prometheus: kube-prometheus-stack
+    role: recording-rules
+    {{- include "monitoring-stack.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: anomaly_detection.recording
+      interval: 30s
+      rules:
+        # smooth QPS into a single vector
+        - record: anomaly_detector:qps_2m
+          expr: |
+            sum(rate(http_requests_total{job="anomaly-detector"}[2m])) by (pod)
+
+        # rolling 1-h average anomaly score
+        - record: anomaly_detector:score_avg_1h
+          expr: |
+            avg_over_time(anomaly_score[1h])
+
+        # node cpu % excluding pause
+        - record: node_cpu_utilisation
+          expr: |
+            1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)
+
+        # memory % used
+        - record: node_memory_utilisation
+          expr: |
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)

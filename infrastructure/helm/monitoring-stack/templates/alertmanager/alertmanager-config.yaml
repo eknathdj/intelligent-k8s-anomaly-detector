@@ -1,0 +1,44 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: {{ include "monitoring-stack.fullname" . }}-am-config
+  labels:
+    alertmanagerConfig: "true"
+    {{- include "monitoring-stack.labels" . | nindent 4 }}
+spec:
+  route:
+    groupBy: ["alertname", "cluster", "service"]
+    groupWait: 10s
+    groupInterval: 5m
+    repeatInterval: 12h
+    receiver: "null"
+    routes:
+      - matchers:
+          - name: severity
+            value: critical
+        receiver: pager
+        continue: true
+      - matchers:
+          - name: severity
+            value: warning
+        receiver: slack
+      - matchers:
+          - name: forecast
+            value: "true"
+        receiver: slack
+        groupWait: 0s
+  receivers:
+    - name: "null"
+    - name: pager
+      pagerdutyConfigs:
+        - serviceKey:
+            key: PAGERDUTY_SERVICE_KEY
+            name: alertmanager-secret
+    - name: slack
+      slackConfigs:
+        - apiURL:
+            key: SLACK_WEBHOOK
+            name: alertmanager-secret
+          channel: "#alerts"
+          title: "{{ .GroupLabels.alertname }}"
+          text: "{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}"

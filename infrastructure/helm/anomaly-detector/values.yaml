@@ -1,0 +1,155 @@
+# ------- Global -------
+global:
+  clusterName: ""        # populated by ArgoCD app-set
+  environment: dev
+  cloudProvider: azure   # azure | aws | gcp
+
+# ------- Image -------
+image:
+  registry: ghcr.io
+  repository: eknathdj/intelligent-k8s-anomaly-detector
+  tag: ""                # empty = appVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []        # eg  [regcred]
+
+# ------- Deployment -------
+replicaCount: 2
+revisionHistoryLimit: 3
+
+# Horizontal Pod Autoscaler (CPU by default – KEDA section below for custom metric)
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80
+
+# PodDisruptionBudget
+pdb:
+  enabled: true
+  minAvailable: 1        # or maxUnavailable: 1
+
+# ------- Resources -------
+resources:
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+# ------- Service -------
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+  # prometheus.io/scrape: "true"   # handled by ServiceMonitor
+
+# ------- Probes -------
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# ------- Ingress -------
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: anomaly.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: anomaly-tls
+    #   hosts: [anomaly.example.com]
+
+# ------- Config / Secrets -------
+configMap:
+  # everything under data becomes env vars (see deployment template)
+  data:
+    LOG_LEVEL: "INFO"
+    PROMETHEUS_URL: "http://kube-prom-kube-prometheus-prometheus.monitoring.svc:9090"
+    MODEL_BUCKET: "mlflow"
+    INFERENCE_THRESHOLD: "0.95"
+    TRAINING_SCHEDULE: "0 */6 * * *"
+
+existingConfigMap: ""   # leave empty to create the one above
+existingSecret: ""      # name of an externally managed secret
+
+# ------- ML Training CronJob -------
+training:
+  enabled: true
+  schedule: "0 */6 * * *"   # overwritten by configMap.TRAINING_SCHEDULE if supplied
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  extraArgs: []            # eg ["--tune", "--validate"]
+
+# ------- Prometheus ServiceMonitor -------
+serviceMonitor:
+  enabled: true
+  namespace: ""            # empty = release namespace
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}               # extra labels for ServiceMonitor selector
+  path: /metrics
+
+# ------- KEDA ScaledObject (optional) -------
+keda:
+  enabled: false
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prom-kube-prometheus-prometheus.monitoring.svc:9090
+        metricName: anomaly_score_qps
+        threshold: "50"
+        query: |
+          sum(rate(http_requests_total{job="anomaly-detector"}[2m])) by (pod)
+
+# ------- Pod labels / annotations / nodeSelector / tolerations -------
+podLabels: {}
+podAnnotations: {}
+  # vault.hashicorp.com/agent-inject: "true"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ------- Security context (non-root, read-only) -------
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 2000
+  readOnlyRootFilesystem: true
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# ------- Extra manifests (raw YAMLs) -------
+extraDeploy: []   # Helm tpl strings, rendered after all templates

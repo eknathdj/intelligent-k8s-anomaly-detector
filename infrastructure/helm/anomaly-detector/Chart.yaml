@@ -1,0 +1,21 @@
+apiVersion: v2
+name: anomaly-detector
+description: >
+  Intelligent Kubernetes anomaly-detection stack:
+  real-time ML inference API + optional background training job.
+type: application
+version: 0.1.0           # chart version
+appVersion: "0.1.0"      # container tag
+home: https://github.com/eknathdj/intelligent-k8s-anomaly-detector
+sources:
+  - https://github.com/eknathdj/intelligent-k8s-anomaly-detector
+maintainers:
+  - name: eknathdj
+    email: maintainer@example.com
+keywords:
+  - kubernetes
+  - anomaly-detection
+  - mlops
+  - prometheus
+  - grafana
+dependencies: []         # add kube-prometheus-crds if CRDs are missing

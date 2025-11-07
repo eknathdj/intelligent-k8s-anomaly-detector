@@ -1,0 +1,40 @@
+{{- if .Values.training.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "anomaly-detector.fullname" . }}-training
+  labels:
+    {{- include "anomaly-detector.labels" . | nindent 4 }}
+    component: training
+spec:
+  schedule: {{ .Values.training.schedule | quote }}
+  concurrencyPolicy: {{ .Values.training.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.training.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.training.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "anomaly-detector.selectorLabels" . | nindent 12 }}
+            component: training
+        spec:
+          restartPolicy: OnFailure
+          {{- with .Values.image.pullSecrets }}
+          imagePullSecrets: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: training
+              image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "ml_pipeline.training.train"]
+              args: {{- toYaml .Values.training.extraArgs | nindent 16 }}
+              resources: {{- toYaml .Values.training.resources | nindent 16 }}
+              envFrom:
+                - configMapRef:
+                    name: {{ .Values.existingConfigMap | default (include "anomaly-detector.fullname" .) }}
+                {{- if .Values.existingSecret }}
+                - secretRef:
+                    name: {{ .Values.existingSecret }}
+                {{- end }}
+{{- end }}

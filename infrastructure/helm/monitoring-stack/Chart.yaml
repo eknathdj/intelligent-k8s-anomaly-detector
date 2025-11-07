@@ -1,0 +1,26 @@
+apiVersion: v2
+name: monitoring-stack
+description: >
+  Full Prometheus/Grafana/Alertmanager stack with custom dashboards,
+  recording rules and anomaly-detection alerts for intelligent-k8s-anomaly-detector.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/eknathdj/intelligent-k8s-anomaly-detector
+sources:
+  - https://github.com/prometheus-community/helm-charts
+  - https://github.com/eknathdj/intelligent-k8s-anomaly-detector
+maintainers:
+  - name: eknathdj
+    email: maintainer@example.com
+keywords:
+  - monitoring
+  - prometheus
+  - grafana
+  - alertmanager
+  - kube-prometheus-stack
+dependencies:
+  - name: kube-prometheus-stack
+    version: 58.x.x   # current 58.x track (Prom 2.51, Grafana 11)
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kube-prometheus-stack.enabled

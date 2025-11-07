@@ -1,0 +1,30 @@
+{{- if or (eq .Values.global.cloudProvider "aws") (eq .Values.global.cloudProvider "gcp") }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "monitoring-stack.fullname" . }}-extra-scrape
+  labels:
+    {{- include "monitoring-stack.labels" . | nindent 4 }}
+stringData:
+  scrape-additional.yaml: |
+    # AWS ECS, RDS, etc. (example)
+    - job_name: cloudwatch-rds
+      ec2_sd_configs:
+        - region: {{ .Values.global.region }}
+          port: 9100
+      relabel_configs:
+        - source_labels: [__meta_ec2_tag_RDS]
+          action: keep
+          regex: "true"
+
+    # GCP GCE example
+    - job_name: gce-cadvisor
+      gce_sd_configs:
+        - project: {{ .Values.global.project }}
+          zone: {{ .Values.global.region }}-*
+          port: 8080
+      relabel_configs:
+        - source_labels: [__meta_gce_tags]
+          regex: .*k8s-node.*
+          action: keep
+{{- end }}
