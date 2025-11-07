@@ -1,0 +1,22 @@
+# Runtime config read by both Python (Pydantic) and Helm values
+global:
+  clusterName: ""          # populated downward
+  environment: dev
+  cloudProvider: azure     # azure | aws | gcp
+
+anomaly_detection:
+  model:
+    artifactPath: /models
+    reloadIntervalSeconds: 300
+  thresholds:
+    critical: 0.95
+    warning: 0.80
+
+prometheus:
+  url: http://prometheus.monitoring.svc:9090
+  scrapeInterval: 15s
+  queryTimeout: 30s
+
+logging:
+  level: INFO
+  format: json

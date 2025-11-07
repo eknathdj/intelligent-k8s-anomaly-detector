@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.6
+# Multi-arch slim image for FastAPI service
+FROM python:3.11-slim-bookworm AS builder
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY src/requirements.txt /tmp/
+RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
+
+COPY src/ /app/src/
+COPY pyproject.toml setup.py README.md /app/
+WORKDIR /app
+RUN pip install .
+
+# ---------- Runtime ----------
+FROM python:3.11-slim-bookworm
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    USER=api \
+    UID=1000
+
+RUN groupadd -g $UID $USER && useradd -u $UID -g $UID -M -s /bin/bash $USER
+
+COPY --from=builder /opt/venv /opt/venv
+
+# health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD python -c "import requests,os; requests.get('http://localhost:8080/health/ready',timeout=2).raise_for_status()"
+
+USER $USER
+EXPOSE 8080
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]

@@ -1,0 +1,22 @@
+global:
+  environment: dev
+  clusterName: k3d-k8s-anomaly
+
+anomaly_detection:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+prometheus:
+  retention: 1d
+  storage: 5Gi
+
+grafana:
+  adminPassword: admin
+  ingress:
+    enabled: false

@@ -1,0 +1,35 @@
+global:
+  environment: prod
+  clusterName: aks-prod
+
+anomaly_detection:
+  replicas: 3
+  hpa:
+    enabled: true
+    min: 3
+    max: 15
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+prometheus:
+  retention: 14d
+  storage: 200Gi
+  remoteWrite:
+    - url: https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-prod/api/v1/remote_write
+
+grafana:
+  adminPassword: <secret>
+  ingress:
+    enabled: true
+    host: grafana.example.com
+    tls:
+      secretName: grafana-tls
+
+alertmanager:
+  slack:
+    channel: '#alerts-prod'

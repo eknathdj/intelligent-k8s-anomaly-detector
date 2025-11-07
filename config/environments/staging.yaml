@@ -1,0 +1,25 @@
+global:
+  environment: staging
+  clusterName: aks-staging
+
+anomaly_detection:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+prometheus:
+  retention: 7d
+  storage: 50Gi
+  remoteWrite:
+    - url: https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-xxx/api/v1/remote_write
+
+grafana:
+  adminPassword: <secret>
+  ingress:
+    enabled: true
+    host: grafana-staging.example.com
