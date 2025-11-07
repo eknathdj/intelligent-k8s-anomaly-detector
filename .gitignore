@@ -1,0 +1,148 @@
+# ---------------------------------------------------------------------------
+#  Global
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# ---------------------------------------------------------------------------
+#  Terraform
+# ---------------------------------------------------------------------------
+# Local .terraform directories
+**/.terraform/*
+# .tfstate files
+*.tfstate
+*.tfstate.*
+# Crash dump files
+crash.log
+crash.*.log
+# Exclude override files as they are usually used to override locally
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Include override files you do wish to add to version control
+# !example_override.tf
+# Provider lock files (keep for CI reproducibility)
+# .terraform.lock.hcl
+# Plan output
+*.tfplan
+# CLI configuration
+.terraformrc
+terraform.rc
+
+# ---------------------------------------------------------------------------
+#  Helm
+# ---------------------------------------------------------------------------
+# Chart dependencies
+**/charts/*.tgz
+**/Chart.lock
+# Rendered test output
+**/templates/tests/__snapshot__/
+
+# ---------------------------------------------------------------------------
+#  Python (ml-pipeline, src, tests, jupyter)
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+*.ipynb
+
+# ---------------------------------------------------------------------------
+#  Node / JS (if you add any frontend later)
+# ---------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---------------------------------------------------------------------------
+#  IDE
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+*.code-workspace
+
+# ---------------------------------------------------------------------------
+#  Local secrets / overrides
+# ---------------------------------------------------------------------------
+*.key
+*.pem
+*.p12
+*.pfx
+.secrets/
+local-overrides.yaml
+local-values.yaml
+**/-local.yaml
+**/-local.json
+
+# ---------------------------------------------------------------------------
+#  OS
+# ---------------------------------------------------------------------------
+# macOS
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+# Windows
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# Linux
+.directory
+.Trash-*
+
+# ---------------------------------------------------------------------------
+#  Temporary / output folders
+# ---------------------------------------------------------------------------
+tmp/
+out/
+output/
+dist/
+site/

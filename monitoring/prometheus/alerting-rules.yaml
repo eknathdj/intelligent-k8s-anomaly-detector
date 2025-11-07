@@ -1,0 +1,29 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: additional-alerting-rules
+  namespace: monitoring
+spec:
+  groups:
+    - name: ml.alerting
+      interval: 30s
+      rules:
+        - alert: ModelDriftDetected
+          expr: |
+            avg_over_time(anomaly_score[1h]) - avg_over_time(anomaly_score[24h]) > 0.3
+          for: 15m
+          labels:
+            severity: warning
+            team: ml
+          annotations:
+            summary: "Model drift suspected"
+            description: "1-h average anomaly score deviates > 0.3 from 24-h baseline"
+
+        - alert: PrometheusNotIngesting
+          expr: |
+            rate(prometheus_tsdb_head_samples_appended_total[5m]) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Prometheus ingestion stuck"

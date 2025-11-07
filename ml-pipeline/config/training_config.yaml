@@ -1,0 +1,17 @@
+# Training job settings
+training:
+  query_window_hours: 6
+  prometheus_step: "1m"
+  test_split_ratio: 0.2
+  random_state: 42
+  tuning:
+    enabled: false
+    trials: 50
+    pruner: median
+  validation:
+    enabled: true
+    k_fold: 5
+  artifacts:
+    model_name: "anomaly-ensemble"
+    model_version: "0.1.0"
+    register_if_f1_gt: 0.85

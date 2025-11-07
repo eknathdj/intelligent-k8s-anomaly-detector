@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: ml-platform
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: dev
+            cluster: k3d-local
+          - env: staging
+            cluster: aks-staging
+          - env: prod
+            cluster: aks-prod
+  template:
+    metadata:
+      name: 'ml-platform-{{env}}'
+      labels:
+        app: ml-platform
+        env: '{{env}}'
+    spec:
+      project: aiops
+      source:
+        repoURL: https://github.com/eknathdj/intelligent-k8s-anomaly-detector.git
+        targetRevision: HEAD
+        path: infrastructure/terraform/modules/ml-platform
+        plugin:
+          name: terraform
+          env:
+            - name: TF_VAR_environment
+              value: '{{env}}'
+            - name: TF_VAR_location
+              value: eastus2
+            - name: TF_VAR_cloud_provider
+              value: azure
+      destination:
+        server: '{{cluster}}'
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

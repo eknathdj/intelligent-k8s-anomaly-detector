@@ -1,0 +1,18 @@
+# Pre-configure Slack notifier (still needs token via env)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-notifiers
+  namespace: monitoring
+  labels:
+    grafana_notifier: "1"
+data:
+  notifiers.yaml: |
+    notifiers:
+      - name: slack-default
+        type: slack
+        uid: slack-1
+        settings:
+          url: $SLACK_WEBHOOK
+          recipient: '#alerts'
+          uploadImage: true

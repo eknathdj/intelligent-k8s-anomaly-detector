@@ -1,0 +1,25 @@
+# Model hyper-parameters
+anomaly_detection:
+  isolation_forest:
+    contamination: 0.01
+    n_estimators: 300
+    max_features: 1.0
+    random_state: 42
+
+  lstm:
+    lookback: 60
+    horizon: 1
+    units: 50
+    epochs: 10
+    batch_size: 32
+    learning_rate: 0.001
+
+  ensemble:
+    weight_iforest: 0.6
+    weight_lstm: 0.4
+
+# Thresholds for alerting
+thresholds:
+  anomaly_score_critical: 0.95
+  anomaly_score_warning: 0.80
+  model_latency_p95_ms: 500

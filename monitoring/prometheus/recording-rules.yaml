@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: additional-recording-rules
+  namespace: monitoring
+spec:
+  groups:
+    - name: ml.recording
+      interval: 30s
+      rules:
+        # baseline per-pod CPU (1 h rolling)
+        - record: pod:cpu_utilisation_1h
+          expr: |
+            avg_over_time(
+              rate(container_cpu_usage_seconds_total{container!=""}[5m])[1h:]
+            )
+        # baseline per-pod memory (1 h rolling)
+        - record: pod:memory_utilisation_1h
+          expr: |
+            avg_over_time(
+              container_memory_working_set_bytes{container!=""}[1h:]
+            ) / 1024 / 1024  # MiB

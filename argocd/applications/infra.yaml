@@ -1,0 +1,48 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: infra
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: dev
+            cluster: k3d-local
+            region: local
+          - env: staging
+            cluster: aks-staging
+            region: eastus2
+          - env: prod
+            cluster: aks-prod
+            region: eastus2
+  template:
+    metadata:
+      name: 'infra-{{env}}'
+      labels:
+        app: infra
+        env: '{{env}}'
+    spec:
+      project: aiops
+      source:
+        repoURL: https://github.com/eknathdj/intelligent-k8s-anomaly-detector.git
+        targetRevision: HEAD
+        path: infrastructure/terraform
+      destination:
+        server: '{{cluster}}'
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+      plugin:
+        name: terraform
+        env:
+          - name: TF_VAR_environment
+            value: '{{env}}'
+          - name: TF_VAR_location
+            value: '{{region}}'
+          - name: TF_VAR_cloud_provider
+            value: azure

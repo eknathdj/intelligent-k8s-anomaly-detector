@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: aiops
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Intelligent Kubernetes Anomaly Detection Platform
+  sourceRepos:
+    - https://github.com/eknathdj/intelligent-k8s-anomaly-detector.git
+  destinations:
+    - namespace: '*'          # allow any namespace we create
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  roles:
+    - name: developers
+      policies:
+        - p, proj:aiops:developers, applications, *, aiops/*, allow
+      groups:
+        - github:my-org:ml-team

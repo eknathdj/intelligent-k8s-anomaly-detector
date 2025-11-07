@@ -1,0 +1,32 @@
+# Static scrape jobs that Helm values.yaml cannot express cleanly
+apiVersion: v1
+kind: Secret
+metadata:
+  name: additional-scrape-configs
+  namespace: monitoring
+type: Opaque
+stringData:
+  scrape-additional.yaml: |
+    # MLflow tracking server (outside cluster possible)
+    - job_name: mlflow
+      static_configs:
+        - targets: ["mlflow.k8s-anomaly.svc.cluster.local:5000"]
+          labels:
+            component: mlflow
+    # Jupyter (if enabled)
+    - job_name: jupyter
+      static_configs:
+        - targets: ["jupyter.k8s-anomaly.svc.cluster.local:8888"]
+          labels:
+            component: jupyter
+    # Node-exporter outside K8s (VMSS, EC2, GCE)
+    - job_name: vm-node-exporter
+      ec2_sd_configs:
+        - region: eastus2
+          port: 9100
+          filters:
+            - name: tag:Project
+              values: [intelligent-k8s-anomaly-detector]
+      relabel_configs:
+        - source_labels: [__meta_ec2_tag_Name]
+          target_label: instance

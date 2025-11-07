@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+data:
+  # Helm pass credentials for private registries
+  helm.repositories: |
+    - url: https://ghcr.io/eknathdj
+      name: ghcr
+      type: helm
+      enableOci: true
+  # Terraform plugin (optional)
+  configManagementPlugins: |
+    - name: terraform
+      init:
+        command: [sh, -c]
+        args: ["terraform init -no-color"]
+      generate:
+        command: [sh, -c]
+        args: ["terraform plan -out=tfplan -no-color && terraform show -json tfplan"]
+      discover:
+        fileName: "main.tf"
+  # SSO example (GitHub)
+  dex.config: |
+    connectors:
+      - type: github
+        id: github
+        name: GitHub
+        config:
+          clientID: $GITHUB_CLIENT_ID
+          clientSecret: $GITHUB_CLIENT_SECRET
+          orgs:
+            - name: my-org

@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: apps
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: dev
+            cluster: k3d-local
+          - env: staging
+            cluster: aks-staging
+          - env: prod
+            cluster: aks-prod
+  template:
+    metadata:
+      name: 'apps-{{env}}'
+      labels:
+        app: apps
+        env: '{{env}}'
+    spec:
+      project: aiops
+      source:
+        repoURL: https://github.com/eknathdj/intelligent-k8s-anomaly-detector.git
+        targetRevision: HEAD
+        path: infrastructure/helm
+        helm:
+          valueFiles:
+            - values.yaml
+            - '../environments/{{env}}.yaml'
+          parameters:
+            - name: global.environment
+              value: '{{env}}'
+      destination:
+        server: '{{cluster}}'
+        namespace: k8s-anomaly-{{env}}
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

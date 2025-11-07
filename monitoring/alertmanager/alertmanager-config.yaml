@@ -1,0 +1,43 @@
+# Global routing for **all** environments (patch per env if needed)
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: global-routing
+  namespace: monitoring
+spec:
+  route:
+    groupBy: ["alertname", "cluster", "severity"]
+    groupWait: 10s
+    groupInterval: 5m
+    repeatInterval: 12h
+    receiver: 'null'
+    routes:
+      - matchers:
+          - name: severity
+            value: critical
+        receiver: pager
+        continue: true
+      - matchers:
+          - name: severity
+            value: warning
+        receiver: slack
+      - matchers:
+          - name: forecast
+            value: "true"
+        receiver: slack
+        groupWait: 0s
+  receivers:
+    - name: 'null'
+    - name: pager
+      pagerdutyConfigs:
+        - serviceKey:
+            key: PAGERDUTY_SERVICE_KEY
+            name: alertmanager-secret
+    - name: slack
+      slackConfigs:
+        - apiURL:
+            key: SLACK_WEBHOOK
+            name: alertmanager-secret
+          channel: '#alerts'
+          title: '{{ .GroupLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}'

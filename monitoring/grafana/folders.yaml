@@ -1,0 +1,22 @@
+# Provision Grafana folders via Grafana-sidecar (label = grafana_folder)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-folders
+  namespace: monitoring
+  labels:
+    grafana_folder: "1"
+data:
+  folders.json: |
+    [
+      {
+        "uid": "mlops",
+        "title": "MLOps",
+        "overwrite": true
+      },
+      {
+        "uid": "anomaly",
+        "title": "Anomaly Detection",
+        "overwrite": true
+      }
+    ]
