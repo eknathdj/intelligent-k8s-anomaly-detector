@@ -1,0 +1,535 @@
+# .github/workflows/deploy-infrastructure.yml
+name: 🏗️ Deploy Infrastructure
+
+on:
+  workflow_dispatch:                          # Manual trigger only (safety!)
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - local
+          - dev
+          - staging
+          - prod
+      cloud_provider:
+        description: 'Cloud provider'
+        required: true
+        default: 'azure'
+        type: choice
+        options:
+          - azure
+          - aws
+          - gcp
+      region:
+        description: 'Cloud region'
+        required: true
+        default: 'East US'
+        type: string
+      destroy:
+        description: 'Destroy infrastructure (DANGEROUS!)'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Dry run (show what would be deployed)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TF_VERSION: '1.9.0'
+  KUBE_VERSION: '1.28.0'
+  HELM_VERSION: '3.13.0'
+
+jobs:
+  # ===================================================================
+  # 🔍 VALIDATION & SETUP
+  # ===================================================================
+  validate:
+    name: 🔍 Validate Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.config.outputs.environment }}
+      cloud_provider: ${{ steps.config.outputs.cloud_provider }}
+      region: ${{ steps.config.outputs.region }}
+      destroy: ${{ steps.config.outputs.destroy }}
+      dry_run: ${{ steps.config.outputs.dry_run }}
+      resource_group: ${{ steps.config.outputs.resource_group }}
+      cluster_name: ${{ steps.config.outputs.cluster_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        id: config
+        run: |
+          # Set outputs from inputs
+          echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          echo "cloud_provider=${{ github.event.inputs.cloud_provider }}" >> $GITHUB_OUTPUT
+          echo "region=${{ github.event.inputs.region }}" >> $GITHUB_OUTPUT
+          echo "destroy=${{ github.event.inputs.destroy }}" >> $GITHUB_OUTPUT
+          echo "dry_run=${{ github.event.inputs.dry_run }}" >> $GITHUB_OUTPUT
+          
+          # Generate resource names
+          ENV="${{ github.event.inputs.environment }}"
+          PROVIDER="${{ github.event.inputs.cloud_provider }}"
+          REGION="${{ github.event.inputs.region }}"
+          
+          # Convert region to safe format (lowercase, no spaces)
+          SAFE_REGION=$(echo "$REGION" | tr '[:upper:]' '[:lower:]' | sed 's/ /-/g')
+          
+          # Generate resource names
+          RESOURCE_GROUP="rg-aiops-${ENV}-${SAFE_REGION}"
+          CLUSTER_NAME="aiops-${ENV}-cluster"
+          
+          echo "resource_group=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          
+          echo "## 📋 Deployment Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | $ENV |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cloud Provider | $PROVIDER |" >> $GITHUB_STEP_SUMMARY
+          echo "| Region | $REGION |" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource Group | $RESOURCE_GROUP |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster Name | $CLUSTER_NAME |" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ github.event.inputs.destroy }}" == "true" ]]; then
+            echo "| ⚠️ **DESTROY MODE** | **ENABLED** |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+            echo "| 🔍 **DRY RUN** | **ENABLED** |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Validate Terraform syntax
+        run: |
+          cd infrastructure/terraform
+          terraform init -backend=false
+          terraform validate
+          echo "✅ Terraform syntax validation passed"
+
+  # ===================================================================
+  # 🔐 CLOUD PROVIDER SETUP
+  # ===================================================================
+  setup-cloud:
+    name: 🔐 Setup ${{ needs.validate.outputs.cloud_provider }}
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      subscription_id: ${{ steps.cloud.outputs.subscription_id }}
+      tenant_id: ${{ steps.cloud.outputs.tenant_id }}
+      client_id: ${{ steps.cloud.outputs.client_id }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Azure CLI
+        if: needs.validate.outputs.cloud_provider == 'azure'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup AWS CLI
+        if: needs.validate.outputs.cloud_provider == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.validate.outputs.region }}
+
+      - name: Setup Google Cloud
+        if: needs.validate.outputs.cloud_provider == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Get cloud provider info
+        id: cloud
+        run: |
+          PROVIDER="${{ needs.validate.outputs.cloud_provider }}"
+          
+          case $PROVIDER in
+            azure)
+              SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+              TENANT_ID=$(az account show --query tenantId -o tsv)
+              echo "subscription_id=$SUBSCRIPTION_ID" >> $GITHUB_OUTPUT
+              echo "tenant_id=$TENANT_ID" >> $GITHUB_OUTPUT
+              echo "✅ Azure subscription: $SUBSCRIPTION_ID"
+              ;;
+            aws)
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              echo "subscription_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+              echo "✅ AWS account: $ACCOUNT_ID"
+              ;;
+            gcp)
+              PROJECT_ID=$(gcloud config get-value project)
+              echo "subscription_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+              echo "✅ GCP project: $PROJECT_ID"
+              ;;
+          esac
+
+  # ===================================================================
+  # 🏗️ DEPLOY INFRASTRUCTURE
+  # ===================================================================
+  deploy-infrastructure:
+    name: 🏗️ Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: [validate, setup-cloud]
+    environment: ${{ needs.validate.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBE_VERSION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Create backend configuration
+        run: |
+          cd infrastructure/terraform
+          
+          ENV="${{ needs.validate.outputs.environment }}"
+          PROVIDER="${{ needs.validate.outputs.cloud_provider }}"
+          RESOURCE_GROUP="${{ needs.validate.outputs.resource_group }}"
+          REGION="${{ needs.validate.outputs.region }}"
+          
+          # Create backend configuration based on cloud provider
+          case $PROVIDER in
+            azure)
+              # Azure Blob Storage backend
+              cat > backend.conf << EOF
+resource_group_name  = "${RESOURCE_GROUP}-tfstate"
+storage_account_name = "tfstate$(echo $RESOURCE_GROUP | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' | cut -c1-20)"
+container_name       = "tfstate"
+key                  = "${ENV}.terraform.tfstate"
+EOF
+              ;;
+            aws)
+              # AWS S3 backend with DynamoDB
+              cat > backend.conf << EOF
+bucket         = "tfstate-${RESOURCE_GROUP}"
+key            = "${ENV}.terraform.tfstate"
+region         = "${REGION}"
+dynamodb_table = "tfstate-${RESOURCE_GROUP}-lock"
+encrypt        = true
+EOF
+              ;;
+            gcp)
+              # Google Cloud Storage backend
+              cat > backend.conf << EOF
+bucket = "tfstate-${RESOURCE_GROUP}"
+prefix = "${ENV}"
+EOF
+              ;;
+          esac
+          
+          echo "✅ Backend configuration created for $PROVIDER"
+          echo "Backend config content:"
+          cat backend.conf
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/terraform
+          terraform init -backend-config=backend.conf
+          
+          if [[ "${{ needs.validate.outputs.destroy }}" == "true" ]]; then
+            echo "🔴 DESTROY MODE: Skipping plan validation"
+          else
+            echo "✅ Terraform initialized successfully"
+          fi
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd infrastructure/terraform
+          
+          ENV="${{ needs.validate.outputs.environment }}"
+          REGION="${{ needs.validate.outputs.region }}"
+          RESOURCE_GROUP="${{ needs.validate.outputs.resource_group }}"
+          CLUSTER_NAME="${{ needs.validate.outputs.cluster_name }}"
+          
+          # Set variables based on environment
+          case $ENV in
+            local)
+              NODE_COUNT=1
+              NODE_SIZE="Standard_B2s"
+              ;;
+            dev)
+              NODE_COUNT=1
+              NODE_SIZE="Standard_D2s_v3"
+              ;;
+            staging)
+              NODE_COUNT=2
+              NODE_SIZE="Standard_D4s_v3"
+              ;;
+            prod)
+              NODE_COUNT=3
+              NODE_SIZE="Standard_D8s_v3"
+              ;;
+          esac
+          
+          # Generate plan
+          terraform plan \
+            -var="environment=${ENV}" \
+            -var="location=${REGION}" \
+            -var="project_name=aiops" \
+            -var="cluster_name=${CLUSTER_NAME}" \
+            -var="resource_group_name=${RESOURCE_GROUP}" \
+            -var="default_node_pool_count=${NODE_COUNT}" \
+            -var="default_node_pool_vm_size=${NODE_SIZE}" \
+            -var="enable_auto_scaling=true" \
+            -var="min_node_count=${NODE_COUNT}" \
+            -var="max_node_count=$((NODE_COUNT * 3))" \
+            -out=tfplan \
+            -detailed-exitcode
+          
+          EXIT_CODE=$?
+          
+          if [[ $EXIT_CODE -eq 0 ]]; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ No changes needed"
+          elif [[ $EXIT_CODE -eq 1 ]]; then
+            echo "❌ Terraform plan failed"
+            exit 1
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+            echo "✅ Changes detected"
+          fi
+
+      - name: Show plan summary
+        if: steps.plan.outputs.no_changes == 'false'
+        run: |
+          cd infrastructure/terraform
+          
+          echo "## 📊 Infrastructure Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Show resources that will be created/modified/destroyed
+          terraform show -json tfplan | jq -r '
+            .resource_changes[] |
+            select(.change.actions[] | contains("create")) |
+            "- \(.type): \(.name)"
+          ' >> $GITHUB_STEP_SUMMARY
+          
+          # Show cost estimation (if available)
+          if command -v terraform-cost-estimation &> /dev/null; then
+            terraform-cost-estimation tfplan >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Terraform Apply/Destroy
+        if: steps.plan.outputs.no_changes == 'false'
+        run: |
+          cd infrastructure/terraform
+          
+          if [[ "${{ needs.validate.outputs.dry_run }}" == "true" ]]; then
+            echo "## 🔍 DRY RUN: Would apply these changes:" >> $GITHUB_STEP_SUMMARY
+            terraform show tfplan
+            exit 0
+          fi
+          
+          if [[ "${{ needs.validate.outputs.destroy }}" == "true" ]]; then
+            echo "🔴 DESTROYING INFRASTRUCTURE..."
+            terraform destroy -auto-approve
+            
+            echo "## 🔴 Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
+            echo "All resources have been successfully destroyed." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🏗️ APPLYING INFRASTRUCTURE CHANGES..."
+            terraform apply tfplan
+            
+            echo "## ✅ Infrastructure Deployed" >> $GITHUB_STEP_SUMMARY
+            echo "Infrastructure has been successfully deployed." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Save Terraform outputs
+        if: steps.plan.outputs.no_changes == 'false' && needs.validate.outputs.destroy != 'true' && needs.validate.outputs.dry_run != 'true'
+        id: outputs
+        run: |
+          cd infrastructure/terraform
+          
+          # Extract key outputs
+          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
+          RESOURCE_GROUP=$(terraform output -raw resource_group_name 2>/dev/null || echo "")
+          GRAFANA_URL=$(terraform output -raw grafana_url 2>/dev/null || echo "")
+          PROMETHEUS_URL=$(terraform output -raw prometheus_url 2>/dev/null || echo "")
+          MLFLOW_URL=$(terraform output -raw mlflow_tracking_url 2>/dev/null || echo "")
+          
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "resource_group=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
+          echo "grafana_url=$GRAFANA_URL" >> $GITHUB_OUTPUT
+          echo "prometheus_url=$PROMETHEUS_URL" >> $GITHUB_OUTPUT
+          echo "mlflow_url=$MLFLOW_URL" >> $GITHUB_OUTPUT
+          
+          # Save kubeconfig
+          terraform output -raw kube_config > kubeconfig-staging
+          echo "kubeconfig saved"
+
+  # ===================================================================
+  # 🧪 POST-DEPLOYMENT VALIDATION
+  # ===================================================================
+  validate-deployment:
+    name: ✅ Validate Deployment
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-infrastructure]
+    if: needs.deploy-infrastructure.result == 'success' && needs.validate.outputs.destroy != 'true' && needs.validate.outputs.dry_run != 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBE_VERSION }}
+
+      - name: Configure cloud provider access
+        run: |
+          PROVIDER="${{ needs.validate.outputs.cloud_provider }}"
+          
+          case $PROVIDER in
+            azure)
+              echo "Configuring Azure access..."
+              echo "${{ secrets.AZURE_CREDENTIALS }}" | base64 -d > azure-credentials.json
+              az login --service-principal -f azure-credentials.json
+              az aks get-credentials \
+                --resource-group ${{ needs.deploy-infrastructure.outputs.resource_group }} \
+                --name ${{ needs.deploy-infrastructure.outputs.cluster_name }} \
+                --admin
+              ;;
+            aws)
+              echo "Configuring AWS access..."
+              aws eks update-kubeconfig \
+                --region ${{ needs.validate.outputs.region }} \
+                --name ${{ needs.deploy-infrastructure.outputs.cluster_name }}
+              ;;
+            gcp)
+              echo "Configuring GCP access..."
+              gcloud container clusters get-credentials \
+                ${{ needs.deploy-infrastructure.outputs.cluster_name }} \
+                --zone ${{ needs.validate.outputs.region }} \
+                --project ${{ needs.setup-cloud.outputs.subscription_id }}
+              ;;
+          esac
+
+      - name: Validate cluster health
+        run: |
+          echo "Checking cluster health..."
+          
+          # Check nodes
+          kubectl get nodes
+          kubectl get nodes -o json | jq -r '.items[] | select(.status.conditions[] | select(.type=="Ready" and .status!="True")) | .metadata.name' | wc -l | xargs echo "Unhealthy nodes:"
+          
+          # Check system pods
+          kubectl get pods -n kube-system
+          kubectl get pods -n kube-system --field-selector=status.phase!=Running,status.phase!=Succeeded | wc -l | xargs echo "Unhealthy system pods:"
+
+      - name: Deploy validation test
+        run: |
+          echo "Running validation test..."
+          
+          # Create test namespace
+          kubectl create namespace validation-test || true
+          
+          # Deploy test pod
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: validation-test
+            namespace: validation-test
+          spec:
+            containers:
+            - name: test
+              image: busybox:1.35
+              command: ["sh", "-c", "sleep 30 && echo 'Test completed'"]
+            restartPolicy: Never
+          EOF
+          
+          # Wait for completion
+          kubectl wait --for=condition=ready pod/validation-test -n validation-test --timeout=60s
+          
+          # Check logs
+          kubectl logs -n validation-test validation-test
+          
+          # Cleanup
+          kubectl delete pod validation-test -n validation-test
+
+      - name: Test storage
+        run: |
+          echo "Testing storage provisioning..."
+          
+          # Create PVC test
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: storage-test
+            namespace: validation-test
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+          EOF
+          
+          # Wait for binding
+          kubectl wait --for=condition=bound pvc/storage-test -n validation-test --timeout=120s
+          
+          echo "✅ Storage test passed"
+          
+          # Cleanup
+          kubectl delete pvc storage-test -n validation-test
+
+      - name: Generate validation report
+        run: |
+          echo "## ✅ Infrastructure Validation Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kubernetes Cluster | ✅ Ready | N/A |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | ✅ Ready | ${{ needs.deploy-infrastructure.outputs.grafana_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | ✅ Ready | ${{ needs.deploy-infrastructure.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| MLflow | ✅ Ready | ${{ needs.deploy-infrastructure.outputs.mlflow_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Run \`make deploy-application ENV=${{ needs.validate.outputs.environment }}\` to deploy the application" >> $GITHUB_STEP_SUMMARY
+          echo "2. Access Grafana at: ${{ needs.deploy-infrastructure.outputs.grafana_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "3. Configure kubectl: \`az aks get-credentials --resource-group ${{ needs.deploy-infrastructure.outputs.resource_group }} --name ${{ needs.deploy-infrastructure.outputs.cluster_name }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ===================================================================
+  # 🧹 CLEANUP
+  # ===================================================================
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [validate, deploy-infrastructure]
+
+    steps:
+      - name: Cleanup artifacts
+        run: |
+          # Remove sensitive files
+          rm -f kubeconfig-staging backend.conf azure-credentials.json
+          
+          echo "✅ Cleanup completed"

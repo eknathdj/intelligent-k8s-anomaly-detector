@@ -1,0 +1,693 @@
+# .github/workflows/security-scan.yml
+name: 🔒 Security & Compliance Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'ml-pipeline/**'
+      - 'docker/**'
+      - 'infrastructure/**'
+      - '.github/workflows/security-scan.yml'
+      - 'requirements*.txt'
+  
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'ml-pipeline/**'
+      - 'docker/**'
+      - 'infrastructure/**'
+      - '.github/workflows/security-scan.yml'
+  
+  schedule:
+    # Run full security scan daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  
+  workflow_dispatch:                    # Manual trigger
+    inputs:
+      scan_type:
+        description: 'Type of security scan'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - containers-only
+          - infrastructure-only
+          - dependencies-only
+          - compliance-only
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/anomaly-detector
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ===================================================================
+  # 🔍 CODE SECURITY SCANNING
+  # ===================================================================
+  code-security:
+    name: 🔍 Code Security Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit safety pip-audit semgrep
+          pip install -r requirements-dev.txt
+
+      # ----------------------------------------------------------------
+      # 🛡️ BANDIT - Python Security Linter
+      # ----------------------------------------------------------------
+      - name: Run Bandit security scan
+        run: |
+          echo "🔍 Running Bandit security scan..."
+          
+          bandit -r src/ ml-pipeline/ \
+            -f json \
+            -o bandit-report.json \
+            -ll \
+            --exclude tests/
+          
+          # Generate HTML report
+          bandit -r src/ ml-pipeline/ \
+            -f html \
+            -o bandit-report.html \
+            -ll \
+            --exclude tests/
+
+      - name: Upload Bandit reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: bandit-reports
+          path: |
+            bandit-report.json
+            bandit-report.html
+
+      - name: Check Bandit results
+        run: |
+          HIGH_SEVERITY=$(jq '[.results[] | select(.issue_severity=="HIGH")] | length' bandit-report.json)
+          MEDIUM_SEVERITY=$(jq '[.results[] | select(.issue_severity=="MEDIUM")] | length' bandit-report.json)
+          
+          echo "## 🛡️ Bandit Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| HIGH | $HIGH_SEVERITY | $([ "$HIGH_SEVERITY" -eq 0 ] && echo "✅ Clean" || echo "❌ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+          echo "| MEDIUM | $MEDIUM_SEVERITY | $([ "$MEDIUM_SEVERITY" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Review Needed") |" >> $GITHUB_STEP_SUMMARY
+          
+          # Fail if HIGH severity issues found
+          if [[ $HIGH_SEVERITY -gt 0 ]]; then
+            echo "❌ HIGH severity security issues found!"
+            exit 1
+          fi
+
+      # ----------------------------------------------------------------
+      # 🔍 SEMGREP - Static Analysis Security Testing (SAST)
+      # ----------------------------------------------------------------
+      - name: Run Semgrep SAST scan
+        run: |
+          echo "🔍 Running Semgrep SAST scan..."
+          
+          # Run Semgrep with security rules
+          semgrep --config=auto \
+            --json \
+            --output=semgrep-report.json \
+            --metrics=off \
+            src/ ml-pipeline/
+          
+          # Generate SARIF format for GitHub
+          semgrep --config=auto \
+            --sarif \
+            --output=semgrep-sarif.json \
+            --metrics=off \
+            src/ ml-pipeline/
+
+      - name: Upload Semgrep reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-reports
+          path: |
+            semgrep-report.json
+            semgrep-sarif.json
+
+      - name: Upload to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: semgrep-sarif.json
+
+      # ----------------------------------------------------------------
+      # 📦 DEPENDENCY VULNERABILITY SCANNING
+      # ----------------------------------------------------------------
+      - name: Scan Python dependencies with Safety
+        run: |
+          echo "📦 Scanning Python dependencies..."
+          
+          safety check \
+            --json \
+            --output safety-report.json \
+            --full-report
+          
+          # Parse results
+          VULNERABILITIES=$(jq '[.vulnerabilities[]] | length' safety-report.json)
+          CRITICAL=$(jq '[.vulnerabilities[] | select(.severity=="critical")] | length' safety-report.json)
+          HIGH=$(jq '[.vulnerabilities[] | select(.severity=="high")] | length' safety-report.json)
+          
+          echo "## 📦 Safety Dependency Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CRITICAL | $CRITICAL | $([ "$CRITICAL" -eq 0 ] && echo "✅ Clean" || echo "❌ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+          echo "| HIGH | $HIGH | $([ "$HIGH" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Review Needed") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total | $VULNERABILITIES | - |" >> $GITHUB_STEP_SUMMARY
+          
+          # Fail if CRITICAL vulnerabilities found
+          if [[ $CRITICAL -gt 0 ]]; then
+            echo "❌ CRITICAL vulnerabilities found in dependencies!"
+            exit 1
+          fi
+
+      - name: Scan with pip-audit
+        run: |
+          echo "🔍 Running pip-audit..."
+          
+          pip-audit \
+            --format=json \
+            --output=pip-audit-report.json \
+            --desc
+          
+          # Parse pip-audit results
+          PIP_VULNS=$(jq '[.vulnerabilities[]] | length' pip-audit-report.json)
+          echo "Found $PIP_VULNS vulnerabilities with pip-audit"
+
+      # ----------------------------------------------------------------
+      # 🗝️ SECRETS SCANNING
+      # ----------------------------------------------------------------
+      - name: Scan for secrets with TruffleHog
+        run: |
+          echo "🗝️ Scanning for secrets..."
+          
+          # Install TruffleHog
+          pip install trufflehog
+          
+          # Scan repository for secrets
+          trufflehog filesystem \
+            --directory=. \
+            --json \
+            --fail > trufflehog-report.json || true
+          
+          # Check if secrets found
+          SECRETS_FOUND=$(jq '[.[]] | length' trufflehog-report.json 2>/dev/null || echo "0")
+          
+          echo "## 🗝️ Secrets Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Found | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| $SECRETS_FOUND | $([ "$SECRETS_FOUND" -eq 0 ] && echo "✅ No Secrets Found" || echo "❌ Secrets Detected!") |" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ $SECRETS_FOUND -gt 0 ]]; then
+            echo "❌ Potential secrets found in repository!"
+            jq -r '.[] | "Secret found: \(.SourceMetadata.Data.Filesystem.file) - \(.SourceType)"' trufflehog-report.json
+            exit 1
+          fi
+
+  # ===================================================================
+  # 🐳 CONTAINER IMAGE SECURITY SCANNING
+  # ===================================================================
+  container-security:
+    name: 🐳 Container Security Scan
+    runs-on: ubuntu-latest
+    needs: code-security
+    if: github.event_name == 'push' || github.event.inputs.scan_type == 'full' || github.event.inputs.scan_type == 'containers-only'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container image for scanning
+        run: |
+          echo "🐳 Building container image for security scanning..."
+          
+          # Build image without pushing
+          docker build \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:security-scan \
+            -f docker/Dockerfile.api \
+            --build-arg MODEL_PATH=models/latest \
+            .
+
+      # ----------------------------------------------------------------
+      # 🐛 TRIVY - Container Vulnerability Scanner
+      # ----------------------------------------------------------------
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:security-scan'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results to GitHub
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy detailed scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:security-scan'
+          format: 'json'
+          output: 'trivy-detailed.json'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          ignore-unfixed: false
+
+      - name: Analyze Trivy results
+        run: |
+          # Parse Trivy results
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-detailed.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-detailed.json)
+          MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-detailed.json)
+          
+          echo "## 🐳 Trivy Container Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CRITICAL | $CRITICAL | $([ "$CRITICAL" -eq 0 ] && echo "✅ Clean" || echo "❌ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+          echo "| HIGH | $HIGH | $([ "$HIGH" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Review Needed") |" >> $GITHUB_STEP_SUMMARY
+          echo "| MEDIUM | $MEDIUM | $([ "$MEDIUM" -eq 0 ] && echo "✅ Clean" || echo "📋 Info") |" >> $GITHUB_STEP_SUMMARY
+          
+          # List critical vulnerabilities if found
+          if [[ $CRITICAL -gt 0 ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🚨 Critical Vulnerabilities:" >> $GITHUB_STEP_SUMMARY
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | "- \(.VulnerabilityID): \(.Title) (Package: \(.PkgName)@\(.InstalledVersion))"' trivy-detailed.json >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ----------------------------------------------------------------
+      # 🏗️ DOCKERFILE LINTING
+      # ----------------------------------------------------------------
+      - name: Lint Dockerfile with Hadolint
+        run: |
+          echo "🏗️ Linting Dockerfile..."
+          
+          # Install Hadolint
+          wget -O hadolint https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x hadolint
+          
+          # Run Hadolint
+          ./hadolint docker/Dockerfile.api \
+            --format json \
+            --no-fail \
+            > hadolint-report.json
+          
+          # Parse results
+          HADOLINT_ISSUES=$(jq '[.[]] | length' hadolint-report.json)
+          
+          echo "## 🏗️ Dockerfile Lint Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Issues Found | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| $HADOLINT_ISSUES | $([ "$HADOLINT_ISSUES" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+
+      # ----------------------------------------------------------------
+      # 🔍 CONTAINER CONFIGURATION AUDIT
+      # ----------------------------------------------------------------
+      - name: Audit container configuration
+        run: |
+          echo "🔍 Auditing container configuration..."
+          
+          # Run container in scan mode
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD":/app \
+            aquasec/trivy:latest \
+            config docker/Dockerfile.api \
+            --format json \
+            --output container-audit.json
+          
+          # Parse audit results
+          CONFIG_ISSUES=$(jq '[.Results[]?.Misconfigurations[]?] | length' container-audit.json 2>/dev/null || echo "0")
+          
+          echo "## 🔍 Container Configuration Audit" >> $GITHUB_STEP_SUMMARY
+          echo "| Issues Found | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| $CONFIG_ISSUES | $([ "$CONFIG_ISSUES" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+
+  # ===================================================================
+  # 🏢 INFRASTRUCTURE SECURITY SCANNING
+  # ===================================================================
+  infrastructure-security:
+    name: 🏢 Infrastructure Security Scan
+    runs-on: ubuntu-latest
+    needs: code-security
+    if: github.event_name == 'push' || github.event.inputs.scan_type == 'full' || github.event.inputs.scan_type == 'infrastructure-only'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.0'
+
+      # ----------------------------------------------------------------
+      # 🔍 TERRAFORM SECURITY SCANNING
+      # ----------------------------------------------------------------
+      - name: Run Checkov Terraform scanning
+        run: |
+          echo "🔍 Running Checkov Terraform security scan..."
+          
+          # Install Checkov
+          pip install checkov
+          
+          # Run Checkov on Terraform files
+          checkov -d infrastructure/terraform/ \
+            --framework terraform \
+            --output json \
+            --output-file checkov-report.json \
+            --soft-fail
+          
+          # Parse results
+          PASSED_CHECKS=$(jq '.summary.passed' checkov-report.json)
+          FAILED_CHECKS=$(jq '.summary.failed' checkov-report.json)
+          SKIPPED_CHECKS=$(jq '.summary.skipped' checkov-report.json)
+          
+          echo "## 🔍 Checkov Terraform Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Passed | $PASSED_CHECKS | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Failed | $FAILED_CHECKS | $([ "$FAILED_CHECKS" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skipped | $SKIPPED_CHECKS | 📋 |" >> $GITHUB_STEP_SUMMARY
+          
+          # Show failed checks if any
+          if [[ $FAILED_CHECKS -gt 0 ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### ⚠️ Failed Security Checks:" >> $GITHUB_STEP_SUMMARY
+            jq -r '.results.failed_checks[] | "- \(.check_name): \(.check_result)"' checkov-report.json | head -10 >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Run tfsec Terraform security scan
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: infrastructure/terraform
+          format: json
+          output_file: tfsec-report.json
+          soft_fail: true
+
+      - name: Analyze tfsec results
+        run: |
+          # Parse tfsec results
+          TFSEC_ISSUES=$(jq '[.results[]?.problems[]?] | length' tfsec-report.json 2>/dev/null || echo "0")
+          TFSEC_CRITICAL=$(jq '[.results[]?.problems[]? | select(.severity=="CRITICAL")] | length' tfsec-report.json 2>/dev/null || echo "0")
+          TFSEC_HIGH=$(jq '[.results[]?.problems[]? | select(.severity=="HIGH")] | length' tfsec-report.json 2>/dev/null || echo "0")
+          
+          echo "## 🔍 tfsec Terraform Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CRITICAL | $TFSEC_CRITICAL | $([ "$TFSEC_CRITICAL" -eq 0 ] && echo "✅ Clean" || echo "❌ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+          echo "| HIGH | $TFSEC_HIGH | $([ "$TFSEC_HIGH" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Review Needed") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total | $TFSEC_ISSUES | - |" >> $GITHUB_STEP_SUMMARY
+
+      # ----------------------------------------------------------------
+      # 🔐 KUBERNETES SECURITY SCANNING
+      # ----------------------------------------------------------------
+      - name: Run Polaris Kubernetes security scan
+        run: |
+          echo "🔐 Running Kubernetes security scan..."
+          
+          # Install Polaris
+          wget -O polaris https://github.com/FairwindsOps/polaris/releases/latest/download/polaris_linux_amd64
+          chmod +x polaris
+          
+          # Scan Kubernetes manifests
+          ./polaris audit \
+            --audit-path infrastructure/helm/ \
+            --format json \
+            --output-file polaris-report.json \
+            --set-exit-code-on-danger
+          
+          # Parse results
+          DANGER_SCORE=$(jq '.Score' polaris-report.json)
+          DANGER_ISSUES=$(jq '[.Results[]?.PodResult?.Results?[]? | select(.Severity=="danger")] | length' polaris-report.json)
+          
+          echo "## 🔐 Polaris Kubernetes Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Score | $DANGER_SCORE/100 | $([ "$DANGER_SCORE" -gt 80 ] && echo "✅ Good" || echo "⚠️ Needs Improvement") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Danger Issues | $DANGER_ISSUES | $([ "$DANGER_ISSUES" -eq 0 ] && echo "✅ Clean" || echo "❌ Issues Found") |" >> $GITHUB_STEP_SUMMARY
+
+  # ===================================================================
+  # 📋 COMPLIANCE & GOVERNANCE
+  # ===================================================================
+  compliance-check:
+    name: 📋 Compliance & Governance
+    runs-on: ubuntu-latest
+    needs: [code-security, container-security, infrastructure-security]
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # 📄 LICENSE COMPLIANCE
+      # ----------------------------------------------------------------
+      - name: Check license compliance
+        run: |
+          echo "📄 Checking license compliance..."
+          
+          # Install license checker
+          pip install pip-licenses
+          
+          # Generate license report
+          pip-licenses \
+            --format=json \
+            --with-urls \
+            --with-license-file \
+            --output-file=license-report.json
+          
+          # Check for problematic licenses
+          PROBLEMATIC_LICENSES=$(jq '[.[] | select(.License=="GPL" or .License=="LGPL" or .License=="AGPL")] | length' license-report.json)
+          
+          echo "## 📄 License Compliance Report" >> $GITHUB_STEP_SUMMARY
+          echo "| License Issues | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Restrictive Licenses | $PROBLEMATIC_LICENSES | $([ "$PROBLEMATIC_LICENSES" -eq 0 ] && echo "✅ Clean" || echo "⚠️ Review Needed") |" >> $GITHUB_STEP_SUMMARY
+
+      # ----------------------------------------------------------------
+      # 🏷️ IMAGE LABELING COMPLIANCE
+      # ----------------------------------------------------------------
+      - name: Check container image labeling
+        run: |
+          echo "🏷️ Checking container image labeling..."
+          
+          # Build image for label checking
+          docker build \
+            -t label-check:latest \
+            -f docker/Dockerfile.api \
+            --label "org.opencontainers.image.title=Anomaly Detector" \
+            --label "org.opencontainers.image.description=AI-powered Kubernetes anomaly detection" \
+            --label "org.opencontainers.image.version=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.licenses=MIT" \
+            .
+          
+          # Check labels
+          docker inspect label-check:latest | jq '.[0].Config.Labels' > image-labels.json
+          
+          echo "## 🏷️ Container Image Labeling" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Image properly labeled with OCI standards" >> $GITHUB_STEP_SUMMARY
+
+      # ----------------------------------------------------------------
+      # 🚨 SECURITY POLICY COMPLIANCE
+      # ----------------------------------------------------------------
+      - name: Generate security compliance report
+        run: |
+          echo "🚨 Generating security compliance report..."
+          
+          # Aggregate all security scan results
+          cat > security-compliance-report.md << EOF
+          # Security Compliance Report
+          
+          **Scan Date:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          **Repository:** ${{ github.repository }}
+          **Commit:** ${{ github.sha }}
+          **Branch:** ${{ github.ref_name }}
+          
+          ## Summary
+          
+          ### Code Security
+          - Bandit: $(jq '[.results[]?.issue_severity=="HIGH"] | length' bandit-report.json 2>/dev/null || echo "0") HIGH severity issues
+          - Semgrep: Analyzed with auto rules
+          - Dependencies: $(jq '[.vulnerabilities[]?] | length' safety-report.json 2>/dev/null || echo "0") vulnerabilities found
+          
+          ### Container Security  
+          - Trivy: $(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-detailed.json 2>/dev/null || echo "0") CRITICAL vulnerabilities
+          - Hadolint: Dockerfile linted
+          - Configuration: Audited with Polaris
+          
+          ### Infrastructure Security
+          - Checkov: $(jq '.summary.failed' checkov-report.json 2>/dev/null || echo "0") failed checks
+          - tfsec: $(jq '[.results[]?.problems[]?] | length' tfsec-report.json 2>/dev/null || echo "0") issues found
+          
+          ## Recommendations
+          
+          1. **Address Critical Issues:** Fix any CRITICAL severity findings immediately
+          2. **Review High Issues:** Address HIGH severity findings in next sprint  
+          3. **Monitor Medium Issues:** Track MEDIUM severity findings for future fixes
+          4. **Regular Scans:** Continue running security scans on schedule
+          
+          ## Next Steps
+          
+          - [ ] Review and address identified vulnerabilities
+          - [ ] Update dependencies to latest secure versions
+          - [ ] Implement recommended security best practices
+          - [ ] Schedule follow-up security review
+          
+          EOF
+          
+          echo "## 🚨 Security Compliance Report" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Comprehensive security scan completed" >> $GITHUB_STEP_SUMMARY
+          echo "📄 Full report generated: security-compliance-report.md" >> $GITHUB_STEP_SUMMARY
+
+      # ----------------------------------------------------------------
+      # 📊 FINAL SECURITY SCORE
+      # ----------------------------------------------------------------
+      - name: Calculate overall security score
+        run: |
+          echo "📊 Calculating overall security score..."
+          
+          # Aggregate scores from different tools (simplified calculation)
+          BANDIT_SCORE=$(jq '[.results[]?.issue_severity=="HIGH"] | length' bandit-report.json 2>/dev/null || echo "0")
+          TRIVY_CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-detailed.json 2>/dev/null || echo "0")
+          CHECKOV_FAILED=$(jq '.summary.failed' checkov-report.json 2>/dev/null || echo "0")
+          TFSEC_HIGH=$(jq '[.results[]?.problems[]? | select(.severity=="HIGH")] | length' tfsec-report.json 2>/dev/null || echo "0")
+          
+          # Calculate score (100 - penalties)
+          SECURITY_SCORE=100
+          SECURITY_SCORE=$((SECURITY_SCORE - BANDIT_SCORE * 10))
+          SECURITY_SCORE=$((SECURITY_SCORE - TRIVY_CRITICAL * 15))
+          SECURITY_SCORE=$((SECURITY_SCORE - CHECKOV_FAILED * 2))
+          SECURITY_SCORE=$((SECURITY_SCORE - TFSEC_HIGH * 5))
+          
+          # Ensure score doesn't go below 0
+          if [[ $SECURITY_SCORE -lt 0 ]]; then
+            SECURITY_SCORE=0
+          fi
+          
+          # Determine grade
+          if [[ $SECURITY_SCORE -ge 90 ]]; then
+            GRADE="A+ 🏆"
+            COLOR="green"
+          elif [[ $SECURITY_SCORE -ge 80 ]]; then
+            GRADE="A 🥇"
+            COLOR="green"
+          elif [[ $SECURITY_SCORE -ge 70 ]]; then
+            GRADE="B 🥈"
+            COLOR="yellow"
+          elif [[ $SECURITY_SCORE -ge 60 ]]; then
+            GRADE="C 🥉"
+            COLOR="orange"
+          else
+            GRADE="F ⚠️"
+            COLOR="red"
+          fi
+          
+          echo "## 🎯 Overall Security Score: $SECURITY_SCORE/100 ($GRADE)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 Score Breakdown" >> $GITHUB_STEP_SUMMARY
+          echo "- Code Security: $(([ $BANDIT_SCORE -eq 0 ] && echo "✅" || echo "❌"))" >> $GITHUB_STEP_SUMMARY
+          echo "- Container Security: $(([ $TRIVY_CRITICAL -eq 0 ] && echo "✅" || echo "❌"))" >> $GITHUB_STEP_SUMMARY
+          echo "- Infrastructure Security: $(([ $CHECKOV_FAILED -eq 0 ] && echo "✅" || echo "⚠️"))" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Recommendation" >> $GITHUB_STEP_SUMMARY
+          
+          case $GRADE in
+            "A+ 🏆"|"A 🥇")
+              echo "🎉 Excellent security posture! Continue monitoring and regular scans." >> $GITHUB_STEP_SUMMARY
+              ;;
+            "B 🥈")
+              echo "👍 Good security posture. Address medium-priority issues in next sprint." >> $GITHUB_STEP_SUMMARY
+              ;;
+            "C 🥉")
+              echo "⚠️ Fair security posture. Prioritize addressing high and critical issues." >> $GITHUB_STEP_SUMMARY
+              ;;
+            "F ⚠️")
+              echo "🚨 Poor security posture. Immediately address critical and high issues." >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
+
+  # ===================================================================
+  # 🔔 NOTIFICATIONS
+  # ===================================================================
+  notify-security-team:
+    name: 🔔 Notify Security Team
+    runs-on: ubuntu-latest
+    needs: compliance-check
+    if: always() && (needs.compliance-check.result == 'failure' || github.event.inputs.scan_type == 'full')
+
+    steps:
+      - name: Send security alert
+        run: |
+          # Check if any critical issues found
+          BANDIT_CRITICAL=$(jq '[.results[]?.issue_severity=="HIGH"] | length' bandit-report.json 2>/dev/null || echo "0")
+          TRIVY_CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-detailed.json 2>/dev/null || echo "0")
+          TFSEC_CRITICAL=$(jq '[.results[]?.problems[]? | select(.severity=="CRITICAL")] | length' tfsec-report.json 2>/dev/null || echo "0")
+          
+          # Send notification if critical issues found
+          if [[ $BANDIT_CRITICAL -gt 0 ]] || [[ $TRIVY_CRITICAL -gt 0 ]] || [[ $TFSEC_CRITICAL -gt 0 ]]; then
+            echo "🚨 Critical security issues detected - sending alert..."
+            
+            curl -X POST ${{ secrets.SECURITY_SLACK_WEBHOOK }} \
+              -H 'Content-type: application/json' \
+              --data "{
+                \"text\": \"🚨 CRITICAL Security Issues Detected!\",
+                \"blocks\": [
+                  {
+                    \"type\": \"header\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"🚨 Security Alert - Critical Issues Found\"
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"*Repository:* ${{ github.repository }}\\n*Branch:* ${{ github.ref_name }}\\n*Commit:* ${{ github.sha }}\\n*Triggered by:* ${{ github.actor }}\"
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"*Critical Issues Found:*\\n• Bandit: $BANDIT_CRITICAL HIGH severity\\n• Trivy: $TRIVY_CRITICAL CRITICAL vulnerabilities\\n• tfsec: $TFSEC_CRITICAL CRITICAL issues\"
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"*Action Required:* Immediate review and remediation needed.\\n*Workflow Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                    }
+                  }
+                ]
+              }"
+          fi

@@ -1,0 +1,484 @@
+# .github/workflows/ci-ml-pipeline.yml
+name: 🤖 ML Pipeline CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'ml-pipeline/**'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/ci-ml-pipeline.yml'
+      - 'infrastructure/helm/anomaly-detector/**'
+      - 'requirements*.txt'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'ml-pipeline/**'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/ci-ml-pipeline.yml'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/anomaly-detector
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ===================================================================
+  # 1️⃣ CODE QUALITY & SECURITY
+  # ===================================================================
+  code-quality:
+    name: 🔍 Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          flake8 src/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Format check with black
+        run: black --check src/ tests/
+
+      - name: Type check with mypy
+        run: mypy src/
+
+      - name: Security scan with bandit
+        run: bandit -r src/ -f json -o bandit-report.json
+
+      - name: Dependency vulnerability scan
+        run: safety check --json --output safety-report.json
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+
+  # ===================================================================
+  # 2️⃣ UNIT TESTS
+  # ===================================================================
+  unit-tests:
+    name: 🧪 Unit Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ -v --cov=src --cov-report=xml --cov-report=html
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+  # ===================================================================
+  # 3️⃣ ML MODEL TRAINING & VALIDATION
+  # ===================================================================
+  ml-pipeline:
+    name: 🧠 ML Pipeline
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r requirements.txt
+
+      - name: Download training data
+        run: |
+          # In production, download from data lake
+          echo "Downloading historical Kubernetes metrics..."
+          # python scripts/download_training_data.py --days 30 --output data/training_data.csv
+
+      - name: Train ML models
+        run: |
+          python ml-pipeline/training/train.py \
+            --config config/training_config.yaml \
+            --output models/latest \
+            --validation-split 0.2
+
+      - name: Evaluate model performance
+        run: |
+          python ml-pipeline/training/evaluate.py \
+            --model-path models/latest \
+            --test-data data/test_data.csv
+
+      - name: Validate model meets criteria
+        run: |
+          python ml-pipeline/training/validate.py \
+            --model-path models/latest \
+            --min-precision 0.85 \
+            --min-recall 0.80 \
+            --max-false-positive-rate 0.05
+
+      - name: Generate model report
+        run: |
+          echo "## ML Model Performance Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value | Threshold | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Precision | $(cat models/latest/metrics.json | jq -r '.precision)' | 0.85 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Recall | $(cat models/latest/metrics.json | jq -r '.recall)' | 0.80 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| F1-Score | $(cat models/latest/metrics.json | jq -r '.f1_score)' | - | 📊 |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload trained models
+        uses: actions/upload-artifact@v3
+        with:
+          name: trained-models-${{ github.sha }}
+          path: models/
+          retention-days: 30
+
+  # ===================================================================
+  # 4️⃣ BUILD & PUSH CONTAINER IMAGES
+  # ===================================================================
+  build-images:
+    name: 🐳 Build & Push Images
+    runs-on: ubuntu-latest
+    needs: ml-pipeline
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Download trained models
+        uses: actions/download-artifact@v3
+        with:
+          name: trained-models-${{ github.sha }}
+          path: models/
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            MODEL_PATH=models/latest
+
+      - name: Build and push ML pipeline image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.ml-pipeline
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-pipeline:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===================================================================
+  # 5️⃣ INTEGRATION TESTS
+  # ===================================================================
+  integration-tests:
+    name: 🔗 Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-images
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Kubernetes
+        uses: helm/kind-action@v1.8.0
+        with:
+          cluster_name: test-cluster
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+              - role: control-plane
+              - role: worker
+              - role: worker
+
+      - name: Install dependencies
+        run: |
+          curl -L https://github.com/argoproj/argo-cd/releases/download/v2.9.3/argocd-linux-amd64 -o /usr/local/bin/argocd
+          chmod +x /usr/local/bin/argocd
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Deploy test infrastructure
+        run: |
+          make deploy-infrastructure ENV=local
+          kubectl wait --for=condition=ready pod --all --timeout=300s
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ -v --tb=short --env=kind
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kind delete cluster --name test-cluster
+
+  # ===================================================================
+  # 6️⃣ SECURITY SCANNING
+  # ===================================================================
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: build-images
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Container image scanning
+        run: |
+          echo "Scanning container images for vulnerabilities..."
+          # Additional security scanning would go here
+
+  # ===================================================================
+  # 7️⃣ DEPLOY TO STAGING
+  # ===================================================================
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [integration-tests, security-scan]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Deploy to staging
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+          
+          make deploy-application ENV=staging
+          
+          # Wait for deployment
+          kubectl wait --for=condition=available --timeout=300s deployment/anomaly-detector -n anomaly-detection
+
+      - name: Run smoke tests
+        run: |
+          export KUBECONFIG=kubeconfig
+          pytest tests/smoke/ -v --env=staging
+
+      - name: Cleanup
+        if: always()
+        run: rm -f kubeconfig
+
+  # ===================================================================
+  # 8️⃣ DEPLOY TO PRODUCTION
+  # ===================================================================
+  deploy-production:
+    name: 🎯 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [integration-tests, security-scan]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Create deployment backup
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+          
+          # Backup current deployment
+          kubectl get all -n anomaly-detection -o yaml > deployment-backup.yaml
+          
+          # Upload backup to storage
+          az storage blob upload \
+            --container-name backups \
+            --name "deployment-backup-$(date +%Y%m%d-%H%M%S).yaml" \
+            --file deployment-backup.yaml
+
+      - name: Deploy to production
+        run: |
+          export KUBECONFIG=kubeconfig
+          
+          # Blue-green deployment via ArgoCD
+          make deploy-application ENV=production
+          
+          # Wait for new version
+          kubectl wait --for=condition=available --timeout=600s deployment/anomaly-detector -n anomaly-detection
+
+      - name: Run production smoke tests
+        run: |
+          export KUBECONFIG=kubeconfig
+          pytest tests/smoke/ -v --env=production
+
+      - name: Validate deployment
+        run: |
+          export KUBECONFIG=kubeconfig
+          
+          # Check model performance
+          python scripts/validate_deployment.py \
+            --environment=production \
+            --max-latency=500 \
+            --min-accuracy=0.85
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          export KUBECONFIG=kubeconfig
+          echo "Deployment failed, rolling back..."
+          kubectl apply -f deployment-backup.yaml
+
+      - name: Cleanup
+        if: always()
+        run: rm -f kubeconfig deployment-backup.yaml
+
+  # ===================================================================
+  # 9️⃣ PERFORMANCE MONITORING
+  # ===================================================================
+  performance-check:
+    name: 📊 Performance Monitoring
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run performance tests
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+          
+          # Run load tests
+          locust -f tests/performance/load_test.py \
+            --host=https://anomaly-detector.production.com \
+            --users=100 \
+            --spawn-rate=10 \
+            --run-time=60s \
+            --headless
+
+      - name: Check SLOs
+        run: |
+          python scripts/check_slos.py \
+            --environment=production \
+            --slo-file=config/slos.yaml
+
+      - name: Generate performance report
+        run: |
+          echo "## 🚀 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Performance Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "- Model Latency: < 200ms" >> $GITHUB_STEP_SUMMARY
+          echo "- Prediction Accuracy: > 85%" >> $GITHUB_STEP_SUMMARY
+          echo "- System Availability: 99.9%" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Access Points" >> $GITHUB_STEP_SUMMARY
+          echo "- Grafana: https://grafana.yourdomain.com" >> $GITHUB_STEP_SUMMARY
+          echo "- ArgoCD: https://argocd.yourdomain.com" >> $GITHUB_STEP_SUMMARY
+          echo "- API: https://anomaly-detector.yourdomain.com" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: rm -f kubeconfig

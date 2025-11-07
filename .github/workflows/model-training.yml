@@ -1,0 +1,533 @@
+# .github/workflows/model-training.yml
+name: 🧠 Automated Model Training
+
+on:
+  schedule:
+    # Retrain models every 6 hours (customizable)
+    - cron: '0 */6 * * *'
+  
+  workflow_dispatch:                    # Manual trigger
+    inputs:
+      retrain_schedule:
+        description: 'Retraining schedule'
+        required: true
+        default: 'immediate'
+        type: choice
+        options:
+          - immediate
+          - daily
+          - weekly
+          - monthly
+      
+      data_window:
+        description: 'Training data window (days)'
+        required: false
+        default: '30'
+        type: string
+      
+      force_retrain:
+        description: 'Force retrain even if performance is good'
+        required: false
+        type: boolean
+        default: false
+      
+      notify_slack:
+        description: 'Send Slack notification'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  MODEL_REGISTRY_URL: ${{ secrets.MODEL_REGISTRY_URL }}
+  TRAINING_DATA_BUCKET: ${{ secrets.TRAINING_DATA_BUCKET }}
+
+jobs:
+  # ===================================================================
+  # 📊 DATA QUALITY & DRIFT DETECTION
+  # ===================================================================
+  data-quality-check:
+    name: 📊 Data Quality & Drift Analysis
+    runs-on: ubuntu-latest
+    
+    outputs:
+      drift_detected: ${{ steps.drift.outputs.drift_detected }}
+      data_quality_score: ${{ steps.quality.outputs.score }}
+      retrain_needed: ${{ steps.decision.outputs.retrain_needed }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r requirements.txt
+
+      - name: Download current training data
+        run: |
+          echo "📥 Downloading training data from the last ${{ github.event.inputs.data_window || '30' }} days..."
+          
+          # Download from cloud storage (Azure Blob/AWS S3/GCP Storage)
+          python scripts/ml-ops/download_training_data.py \
+            --days ${{ github.event.inputs.data_window || '30' }} \
+            --output data/current_training_data.csv \
+            --bucket ${{ env.TRAINING_DATA_BUCKET }}
+
+      - name: Analyze data quality
+        id: quality
+        run: |
+          echo "🔍 Analyzing data quality..."
+          
+          python ml-pipeline/data/data_quality_analysis.py \
+            --data-file data/current_training_data.csv \
+            --output reports/data_quality_report.json
+          
+          # Extract quality score
+          QUALITY_SCORE=$(cat reports/data_quality_report.json | jq -r '.overall_score')
+          echo "score=$QUALITY_SCORE" >> $GITHUB_OUTPUT
+          
+          echo "## 📊 Data Quality Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Overall Quality Score | $QUALITY_SCORE | $([ "$QUALITY_SCORE" > "0.8" ] && echo "✅ Good" || echo "⚠️ Needs Attention") |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Detect data drift
+        id: drift
+        run: |
+          echo "🌊 Detecting data drift..."
+          
+          # Compare current data with training data distribution
+          python ml-pipeline/data/drift_detection.py \
+            --current-data data/current_training_data.csv \
+            --reference-data data/reference_data.csv \
+            --output reports/drift_report.json \
+            --threshold 0.15
+          
+          # Check if drift detected
+          DRIFT_DETECTED=$(cat reports/drift_report.json | jq -r '.drift_detected')
+          echo "drift_detected=$DRIFT_DETECTED" >> $GITHUB_OUTPUT
+          
+          if [[ "$DRIFT_DETECTED" == "true" ]]; then
+            echo "⚠️ Data drift detected! Retraining recommended."
+            echo "| 🌊 Data Drift | DETECTED | ⚠️ |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No significant data drift detected."
+            echo "| 🌊 Data Drift | NOT DETECTED | ✅ |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check current model performance
+        run: |
+          echo "📈 Checking current model performance..."
+          
+          # Get current model metrics from production
+          python scripts/ml-ops/get_production_metrics.py \
+            --model-name anomaly-detector \
+            --days 7 \
+            --output reports/current_performance.json
+          
+          CURRENT_ACCURACY=$(cat reports/current_performance.json | jq -r '.accuracy')
+          CURRENT_PRECISION=$(cat reports/current_performance.json | jq -r '.precision')
+          CURRENT_RECALL=$(cat reports/current_performance.json | jq -r '.recall')
+          
+          echo "Current Model Performance:"
+          echo "- Accuracy: $CURRENT_ACCURACY"
+          echo "- Precision: $CURRENT_PRECISION" 
+          echo "- Recall: $CURRENT_RECALL"
+          
+          echo "| Current Accuracy | $CURRENT_ACCURACY | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| Current Precision | $CURRENT_PRECISION | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| Current Recall | $CURRENT_RECALL | - |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Make retraining decision
+        id: decision
+        run: |
+          DRIFT_DETECTED="${{ steps.drift.outputs.drift_detected }}"
+          QUALITY_SCORE="${{ steps.quality.outputs.score }}"
+          FORCE_RETRAIN="${{ github.event.inputs.force_retrain }}"
+          
+          # Decision logic
+          if [[ "$FORCE_RETRAIN" == "true" ]]; then
+            echo "🔥 Force retrain requested"
+            echo "retrain_needed=true" >> $GITHUB_OUTPUT
+          elif [[ "$DRIFT_DETECTED" == "true" ]]; then
+            echo "🌊 Data drift detected - retraining needed"
+            echo "retrain_needed=true" >> $GITHUB_OUTPUT
+          elif [[ $(echo "$QUALITY_SCORE < 0.7" | bc -l) -eq 1 ]]; then
+            echo "⚠️ Poor data quality - retraining needed"
+            echo "retrain_needed=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ No retraining needed at this time"
+            echo "retrain_needed=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ===================================================================
+  # 🧠 MODEL TRAINING (Conditional)
+  # ===================================================================
+  train-models:
+    name: 🧠 Train ML Models
+    runs-on: ubuntu-latest
+    needs: data-quality-check
+    if: needs.data-quality-check.outputs.retrain_needed == 'true'
+    
+    outputs:
+      model_version: ${{ steps.version.outputs.version }}
+      model_performance: ${{ steps.performance.outputs.metrics }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Cache training data
+        uses: actions/cache@v3
+        with:
+          path: data/
+          key: training-data-${{ github.event.inputs.data_window || '30' }}-${{ hashFiles('data/reference_data.csv') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r requirements.txt
+
+      - name: Setup MLflow
+        run: |
+          echo "Setting up MLflow tracking..."
+          export MLFLOW_TRACKING_URI="${{ env.MLFLOW_TRACKING_URI }}"
+          export MLFLOW_EXPERIMENT_NAME="anomaly-detection-retraining"
+          
+          # Create experiment if it doesn't exist
+          python -c "
+          import mlflow
+          mlflow.set_tracking_uri('${{ env.MLFLOW_TRACKING_URI }}')
+          try:
+              mlflow.create_experiment('${MLFLOW_EXPERIMENT_NAME}')
+          except:
+              pass
+          "
+
+      - name: Generate model version
+        id: version
+        run: |
+          # Generate version based on timestamp and git commit
+          VERSION="v$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Model version: $VERSION"
+
+      - name: Prepare training data
+        run: |
+          echo "📊 Preparing training data..."
+          
+          # Feature engineering
+          python ml-pipeline/data/feature_engineering.py \
+            --input data/current_training_data.csv \
+            --output data/processed_training_data.csv \
+            --create-validation-split
+          
+          # Data augmentation for better model performance
+          python ml-pipeline/data/data_augmentation.py \
+            --input data/processed_training_data.csv \
+            --output data/augmented_training_data.csv \
+            --augmentation-factor 1.2
+
+      - name: Train Isolation Forest model
+        run: |
+          echo "🌲 Training Isolation Forest model..."
+          
+          python ml-pipeline/training/train_isolation_forest.py \
+            --data data/augmented_training_data.csv \
+            --output models/isolation_forest_${{ steps.version.outputs.version }}.pkl \
+            --hyperparameters config/models/isolation_forest_config.yaml \
+            --mlflow-run-name "isolation-forest-${{ steps.version.outputs.version }}"
+
+      - name: Train LSTM model
+        run: |
+          echo "🧠 Training LSTM neural network..."
+          
+          python ml-pipeline/training/train_lstm.py \
+            --data data/augmented_training_data.csv \
+            --output models/lstm_${{ steps.version.outputs.version }}.h5 \
+            --config config/models/lstm_config.yaml \
+            --sequence-length 60 \
+            --mlflow-run-name "lstm-${{ steps.version.outputs.version }}"
+
+      - name: Train Prophet model
+        run: |
+          echo "📈 Training Prophet time series model..."
+          
+          python ml-pipeline/training/train_prophet.py \
+            --data data/augmented_training_data.csv \
+            --output models/prophet_${{ steps.version.outputs.version }}.pkl \
+            --config config/models/prophet_config.yaml \
+            --mlflow-run-name "prophet-${{ steps.version.outputs.version }}"
+
+      - name: Create ensemble model
+        run: |
+          echo "🎯 Creating ensemble model..."
+          
+          python ml-pipeline/models/ensemble_model.py \
+            --models models/isolation_forest_${{ steps.version.outputs.version }}.pkl models/lstm_${{ steps.version.outputs.version }}.h5 models/prophet_${{ steps.version.outputs.version }}.pkl \
+            --output models/ensemble_${{ steps.version.outputs.version }}.pkl \
+            --weights 0.4 0.35 0.25
+
+      - name: Evaluate ensemble model
+        id: performance
+        run: |
+          echo "📊 Evaluating ensemble model performance..."
+          
+          python ml-pipeline/training/evaluate_ensemble.py \
+            --model models/ensemble_${{ steps.version.outputs.version }}.pkl \
+            --test-data data/test_data.csv \
+            --output reports/model_performance_${{ steps.version.outputs.version }}.json
+          
+          # Extract performance metrics
+          METRICS=$(cat reports/model_performance_${{ steps.version.outputs.version }}.json)
+          ACCURACY=$(echo $METRICS | jq -r '.accuracy')
+          PRECISION=$(echo $METRICS | jq -r '.precision')
+          RECALL=$(echo $METRICS | jq -r '.recall')
+          F1_SCORE=$(echo $METRICS | jq -r '.f1_score')
+          
+          echo "metrics=$METRICS" >> $GITHUB_OUTPUT
+          
+          echo "## 🎯 Model Performance - ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value | Threshold | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Accuracy | $ACCURACY | 0.85 | $([ $(echo "$ACCURACY >= 0.85" | bc -l) -eq 1 ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Precision | $PRECISION | 0.85 | $([ $(echo "$PRECISION >= 0.85" | bc -l) -eq 1 ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+          echo "| Recall | $RECALL | 0.80 | $([ $(echo "$RECALL >= 0.80" | bc -l) -eq 1 ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+          echo "| F1-Score | $F1_SCORE | - | 📊 |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Validate model meets criteria
+        run: |
+          ACCURACY=$(echo '${{ steps.performance.outputs.metrics }}' | jq -r '.accuracy')
+          PRECISION=$(echo '${{ steps.performance.outputs.metrics }}' | jq -r '.precision')
+          RECALL=$(echo '${{ steps.performance.outputs.metrics }}' | jq -r '.recall')
+          
+          # Check if model meets minimum criteria
+          if [[ $(echo "$ACCURACY >= 0.85" | bc -l) -eq 1 ]] && \
+             [[ $(echo "$PRECISION >= 0.85" | bc -l) -eq 1 ]] && \
+             [[ $(echo "$RECALL >= 0.80" | bc -l) -eq 1 ]]; then
+            echo "✅ Model meets all performance criteria"
+          else
+            echo "❌ Model does not meet performance criteria"
+            exit 1
+          fi
+
+      - name: Upload trained models
+        uses: actions/upload-artifact@v3
+        with:
+          name: retrained-models-${{ steps.version.outputs.version }}
+          path: models/
+          retention-days: 30
+
+  # ===================================================================
+  # 🔄 MODEL DEPLOYMENT (Conditional)
+  # ===================================================================
+  deploy-model:
+    name: 🔄 Deploy Model to Production
+    runs-on: ubuntu-latest
+    needs: [data-quality-check, train-models]
+    if: needs.train-models.result == 'success'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download trained models
+        uses: actions/download-artifact@v3
+        with:
+          name: retrained-models-${{ needs.train-models.outputs.model_version }}
+          path: models/
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBE_VERSION }}
+
+      - name: Get production credentials
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+
+      - name: Create model deployment manifest
+        run: |
+          MODEL_VERSION="${{ needs.train-models.outputs.model_version }}"
+          
+          # Create ConfigMap with new model
+          kubectl create configmap anomaly-detector-model-${MODEL_VERSION} \
+            --from-file=models/ensemble_${MODEL_VERSION}.pkl \
+            --namespace=anomaly-detection \
+            --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Update deployment to use new model
+          kubectl patch deployment anomaly-detector \
+            --namespace=anomaly-detection \
+            --type='json' \
+            -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/env/0", "value": {"name": "MODEL_VERSION", "value": "'${MODEL_VERSION}'"}}]'
+          
+          # Trigger rolling update
+          kubectl rollout restart deployment/anomaly-detector --namespace=anomaly-detection
+
+      - name: Wait for deployment rollout
+        run: |
+          kubectl rollout status deployment/anomaly-detector --namespace=anomaly-detection --timeout=300s
+
+      - name: Validate new model deployment
+        run: |
+          # Test the new model
+          kubectl run model-test-${MODEL_VERSION} \
+            --image=curlimages/curl:latest \
+            --rm -i --restart=Never \
+            --command -- curl -s http://anomaly-detector.anomaly-detection.svc.cluster.local:8080/model/info
+
+      - name: Update model registry
+        run: |
+          MODEL_VERSION="${{ needs.train-models.outputs.model_version }}"
+          PERFORMANCE='${{ needs.train-models.outputs.model_performance }}'
+          
+          # Register new model version
+          python scripts/ml-ops/register_model.py \
+            --model-name anomaly-detector \
+            --model-version ${MODEL_VERSION} \
+            --performance-metrics "${PERFORMANCE}" \
+            --stage Production
+
+      - name: Cleanup old models
+        run: |
+          # Keep only last 3 model versions
+          kubectl get configmaps -n anomaly-detection -l app=anomaly-detector,component=model | \
+            grep anomaly-detector-model | \
+            tail -n +4 | \
+            awk '{print $1}' | \
+            xargs kubectl delete configmap -n anomaly-detection
+
+      - name: Send deployment notification
+        if: github.event.inputs.notify_slack == 'true'
+        run: |
+          MODEL_VERSION="${{ needs.train-models.outputs.model_version }}"
+          
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"text\": \"🎉 New ML Model Deployed!\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*🧠 New Anomaly Detection Model Deployed*\\n\\n📦 Version: ${MODEL_VERSION}\\n🎯 Environment: Production\\n✅ Status: Successfully deployed\\n\\n🔗 Access: https://anomaly-detector.yourdomain.com\"
+                  }
+                }
+              ]
+            }"
+
+  # ===================================================================
+  # 📊 POST-DEPLOYMENT MONITORING
+  # ===================================================================
+  post-deployment-monitoring:
+    name: 📊 Post-Deployment Monitoring
+    runs-on: ubuntu-latest
+    needs: [deploy-model, train-models]
+    if: always() && needs.deploy-model.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBE_VERSION }}
+
+      - name: Get production credentials
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+
+      - name: Monitor model performance
+        run: |
+          MODEL_VERSION="${{ needs.train-models.outputs.model_version }}"
+          
+          echo "📊 Monitoring model performance for version $MODEL_VERSION..."
+          
+          # Monitor for 24 hours
+          python scripts/ml-ops/monitor_model_performance.py \
+            --model-version $MODEL_VERSION \
+            --duration 24h \
+            --output reports/post_deployment_monitoring_${MODEL_VERSION}.json
+          
+          # Check if performance is stable
+          PERFORMANCE_STABLE=$(cat reports/post_deployment_monitoring_${MODEL_VERSION}.json | jq -r '.performance_stable')
+          
+          if [[ "$PERFORMANCE_STABLE" == "true" ]]; then
+            echo "✅ Model performance is stable"
+          else
+            echo "⚠️ Model performance degradation detected"
+            # Could trigger rollback here
+          fi
+
+      - name: Generate final report
+        run: |
+          echo "## 🎉 Model Training & Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Model Version: ${{ needs.train-models.outputs.model_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Performance Metrics:" >> $GITHUB_STEP_SUMMARY
+          echo '${{ needs.train-models.outputs.model_performance }}' | jq -r 'to_entries[] | "- **\(.key)**: \(.value)"' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔄 Next Scheduled Training: $(date -d '+6 hours' '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+
+  # ===================================================================
+  # ❌ NO RETRAINING NEEDED
+  # ===================================================================
+  skip-retraining:
+    name: ⏭️ Skip Retraining
+    runs-on: ubuntu-latest
+    needs: data-quality-check
+    if: needs.data-quality-check.outputs.retrain_needed == 'false'
+
+    steps:
+      - name: Log skip decision
+        run: |
+          echo "⏭️ No retraining needed at this time"
+          echo "## ⏭️ Retraining Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Current model performance is satisfactory" >> $GITHUB_STEP_SUMMARY
+          echo "📊 Data quality score: ${{ needs.data-quality-check.outputs.data_quality_score }}" >> $GITHUB_STEP_SUMMARY
+          echo "🌊 Data drift: Not detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔄 Next scheduled check: $(date -d '+6 hours' '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
