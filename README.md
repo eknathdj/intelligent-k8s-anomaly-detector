@@ -1,338 +1,212 @@
-# Intelligent Kubernetes Anomaly Detector 🚀
+# Intelligent Kubernetes Anomaly Detector
 
-**Predictive, ML-powered anomaly detection for Kubernetes workloads**  
-*Reduce false positives by 85% and catch incidents 30 minutes earlier.*
+> ML-powered predictive anomaly detection for Kubernetes workloads  
+> **Reduce false positives by 85% • Catch incidents 30 minutes earlier**
 
----
+[![CI](https://github.com/eknathdj/intelligent-k8s-anomaly-detector/workflows/CI/badge.svg)](https://github.com/eknathdj/intelligent-k8s-anomaly-detector/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## 📁 Repository Structure
-intelligent-k8s-anomaly-detector/
-├── .github/
-│   ├── workflows/
-│   │   ├── ci.yml                    # Lint → test → build → push
-│   │   ├── deploy-infrastructure.yml # Terraform apply
-│   │   ├── model-training.yml        # Automated retraining
-│   │   └── security-scan.yml         # Trivy + Snyk
-│   └── ISSUE_TEMPLATE/
-│       └── bug.md
-│
-├── infrastructure/
-│   ├── terraform/
-│   │   ├── main.tf                   # Root TF config
-│   │   ├── variables.tf
-│   │   ├── outputs.tf
-│   │   └── modules/
-│   │       ├── kubernetes/           # AKS/EKS/GKE cluster
-│   │       ├── monitoring/           # Prometheus/Grafana
-│   │       ├── ml-platform/          # MLflow + PostgreSQL + storage
-│   │       └── networking/           # Multi-cloud VPC/VNet/NSGs
-│   └── helm/
-│       ├── anomaly-detector/         # ML API + training CronJob
-│       │   ├── Chart.yaml
-│       │   ├── values.yaml
-│       │   └── templates/
-│       │       ├── deployment.yaml
-│       │       ├── service.yaml
-│       │       ├── configmap.yaml
-│       │       ├── hpa.yaml
-│       │       ├── servicemonitor.yaml
-│       │       ├── cronjob.yaml
-│       │       ├── pdb.yaml
-│       │       └── ingress.yaml
-│       └── monitoring-stack/         # kube-prometheus-stack + extras
-│           ├── Chart.yaml
-│           ├── values.yaml
-│           └── templates/
-│               ├── extra-prometheus-rules.yaml
-│               ├── extra-grafana-dashboards.yaml
-│               └── extra-alertmanager-config.yaml
-│
-├── ml-pipeline/
-│   ├── src/
-│   │   └── ml_pipeline/
-│   │       ├── data/
-│   │       │   ├── data_collector.py      # Prometheus client
-│   │       │   └── feature_engineering.py # Rolling stats, FFT, lags
-│   │       ├── models/
-│   │       │   ├── anomaly_detector.py    # Isolation Forest
-│   │       │   ├── time_series_predictor.py # LSTM
-│   │       │   └── ensemble_model.py      # Weighted combo
-│   │       ├── training/
-│   │       │   └── train.py               # CLI entry-point
-│   │       └── deployment/
-│   │           └── model_server.py        # Unused (API separate)
-│   ├── notebooks/
-│   │   ├── 01_data_exploration.ipynb
-│   │   ├── 02_model_development.ipynb
-│   │   ├── 03_model_evaluation.ipynb
-│   │   └── 04_deployment_testing.ipynb
-│   ├── config/
-│   │   ├── model_config.yaml
-│   │   ├── training_config.yaml
-│   │   └── deployment_config.yaml
-│   ├── requirements.txt
-│   ├── requirements-dev.txt
-│   ├── setup.py
-│   ├── pyproject.toml
-│   └── Dockerfile
-│
-├── src/
-│   ├── anomaly_detector/
-│   │   ├── detector.py           # Model loader & predictor
-│   │   ├── metrics_processor.py  # Feature-engineering reuse
-│   │   ├── alert_generator.py    # Alertmanager client
-│   │   └── health_check.py       # Liveness/readiness probes
-│   ├── api/
-│   │   ├── main.py               # FastAPI app
-│   │   ├── core/
-│   │   │   ├── config.py         # Pydantic settings
-│   │   │   ├── logging.py        # Structlog setup
-│   │   │   └── container.py      # DI container
-│   │   ├── routes/
-│   │   │   ├── health.py
-│   │   │   ├── predictions.py    # POST /predict
-│   │   │   └── metrics.py        # Prometheus exposition
-│   │   └── models/
-│   │       └── schemas.py        # Pydantic request/response
-│   ├── monitoring/
-│   │   ├── prometheus_client.py  # Custom metrics
-│   │   └── metrics_exporter.py
-│   └── utils/
-│       ├── kubernetes_client.py
-│       ├── prometheus_client.py
-│       └── alerting.py
-│
-├── argocd/
-│   ├── projects/
-│   │   └── aiops-project.yaml    # RBAC & repo scope
-│   ├── applications/
-│   │   └── root-app.yaml         # App-of-Apps
-│   ├── applicationsets/
-│   │   ├── infra.yaml            # Terraform per env
-│   │   ├── apps.yaml             # Helm per env
-│   │   └── ml-platform.yaml      # ML infra per env
-│   └── config/
-│       ├── kustomization.yaml    # ArgoCD self-install
-│       ├── argocd-cm.yaml        # Plugins & SSO
-│       └── rbac.yaml             # Terraform plugin RBAC
-│
-├── monitoring/
-│   ├── prometheus/
-│   │   ├── additional-scrape-configs.yaml
-│   │   ├── recording-rules.yaml
-│   │   └── alerting-rules.yaml
-│   ├── grafana/
-│   │   ├── folders.yaml
-│   │   └── notifiers.yaml
-│   ├── alertmanager/
-│   │   └── alertmanager-config.yaml
-│   └── scripts/
-│       └── apply-static.sh       # One-time static apply
-│
-├── scripts/
-│   ├── setup/
-│   │   └── install-dependencies.sh # Brew/apt installer
-│   ├── deployment/
-│   │   ├── deploy-infrastructure.sh
-│   │   ├── deploy-application.sh
-│   │   └── deploy-models.sh
-│   ├── ml-ops/
-│   │   ├── train-model.sh        # Local container training
-│   │   ├── evaluate-model.sh     # Pytest in container
-│   │   ├── deploy-model.sh       # Copy model to PVC
-│   │   └── monitor-model.sh      # Port-forward Grafana
-│   ├── utilities/
-│   │   ├── generate-config.sh    # Seed local .env
-│   │   ├── backup-models.sh      # Blob/S3 backup
-│   │   └── cleanup.sh            # Nuke everything
-│   └── demo/
-│       ├── chaos-cpu-spike.sh
-│       └── chaos-memory-leak.sh
-│
-├── tests/
-│   ├── unit/
-│   │   ├── test_anomaly_detector.py
-│   │   ├── test_feature_engineering.py
-│   │   └── test_api.py
-│   ├── integration/
-│   │   ├── test_kubernetes.bats
-│   │   ├── test_prometheus.py
-│   │   └── test_deployment.py
-│   ├── performance/
-│   │   ├── load_test.py          # Locustfile
-│   │   └── stress_test.js        # K6 script
-│   ├── conftest.py
-│   ├── tox.ini
-│   ├── .pytest.ini
-│   └── .coveragerc
-│
-├── docs/
-│   ├── architecture/
-│   │   ├── overview.md
-│   │   └── data-flow.md
-│   ├── deployment/
-│   │   ├── quickstart.md
-│   │   ├── production.md
-│   │   └── troubleshooting.md
-│   ├── development/
-│   │   ├── setup.md
-│   │   ├── contributing.md
-│   │   └── testing.md
-│   ├── api/
-│   │   ├── endpoints.md
-│   │   └── examples.md
-│   └── images/                    # Screenshots, diagrams
-│
-├── docker/
-│   ├── Dockerfile.api             # FastAPI multi-arch
-│   ├── Dockerfile.ml-pipeline     # Training/inference
-│   ├── docker-compose.yml         # Local full-stack
-│   └── docker-bake.hcl            # Buildx bake
-│
-├── config/
-│   ├── config.yaml                # Base defaults
-│   ├── kubernetes/
-│   │   ├── namespace.yaml
-│   │   ├── rbac.yaml
-│   │   └── network-policy.yaml
-│   └── environments/
-│       ├── development.yaml
-│       ├── staging.yaml
-│       └── production.yaml
-│
-├── .gitignore
-├── .pre-commit-config.yaml
-├── pyproject.toml
-├── Makefile
-└── README.md                    # ← YOU ARE HERE
-Copy
+## 🎯 What It Does
 
----
+Real-time anomaly detection for Kubernetes using ensemble ML models (Isolation Forest + LSTM + Prophet). Integrates with your existing monitoring stack to provide:
+
+- **Sub-second inference** on streaming Prometheus metrics
+- **Predictive scaling** with 30-minute forecast horizons
+- **GitOps deployment** via ArgoCD
+- **Multi-cloud support** (Azure, AWS, GCP)
 
 ## 🚀 Quick Start
 
-### 1. **Prerequisites**
-```bash
-# macOS / Linux
-make bootstrap        # installs terraform, kubectl, helm, k3d, pre-commit
+### Prerequisites
+- Docker
+- kubectl ≥ 1.28
+- Helm ≥ 3.13
+- Terraform ≥ 1.9
 
-# Or manually: Docker, kubectl ≥1.28, Helm ≥3.13, Terraform ≥1.9
-2. Local Cluster (k3d) in 5 min
-bash
-Copy
-make k3d-up           # creates cluster + registry
+```bash
+# Install dependencies (macOS/Linux)
+make bootstrap
+```
+
+### Local Demo (5 minutes)
+
+```bash
+# 1. Create local k3d cluster
+make k3d-up
+
+# 2. Deploy infrastructure and application
 make deploy-infra CLOUD=local
 make deploy-app ENV=dev
-make open            # opens Grafana, ArgoCD, MLflow
-3. Trigger Demo Anomaly
-bash
-Copy
-make demo-cpu        # CPU spike → anomaly alert within 30 s
-# watch Grafana dashboard at http://localhost:3000/d/anomaly-detection
-🎯 Key Features
-Real-time anomaly detection – sub-second inference on streaming metrics
-Ensemble ML – Isolation Forest + LSTM + Prophet
-Predictive scaling – forecast resource needs 30 min ahead
-GitOps-ready – ArgoCD manages entire stack from this repo
-Multi-cloud – Azure, AWS, GCP (Terraform modules)
-Observability – Prometheus + Grafana + custom dashboards
-MLOps – MLflow registry, automated retraining, model monitoring
-🏗️ Architecture
-Mermaid
-Fullscreen 
-Download 
-Copy
-Code
-Preview
-GitOps
 
-Inference
+# 3. Access dashboards
+make open  # Opens Grafana, ArgoCD, MLflow
 
-Training
+# 4. Trigger demo anomaly
+make demo-cpu  # Watch alerts fire in ~30 seconds
+```
 
-Data Collection
+Access dashboards:
+- **Grafana**: http://localhost:3000 (admin/admin)
+- **ArgoCD**: https://localhost:8080
+- **MLflow**: http://localhost:5000
 
-scrapes
+## 📐 Architecture
 
-queries
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│ Prometheus  │────▶│ Feature Eng. │────▶│   MLflow    │
+│  (metrics)  │     │   CronJob    │     │  Registry   │
+└─────────────┘     └──────────────┘     └─────────────┘
+       │                                          │
+       │ queries                          loads model
+       ▼                                          ▼
+┌─────────────┐                          ┌─────────────┐
+│   FastAPI   │◀─────── predicts ────────│   Model     │
+│  Inference  │                          │  Ensemble   │
+└─────────────┘                          └─────────────┘
+       │
+       │ alerts
+       ▼
+┌─────────────┐     ┌──────────────┐
+│Alertmanager │────▶│  PagerDuty   │
+│             │     │  Slack/Email │
+└─────────────┘     └──────────────┘
+```
 
-features
+**Key Components:**
+- **Data Collection**: Prometheus scrapes K8s metrics
+- **Feature Engineering**: Rolling stats, FFT, lag features
+- **ML Training**: Automated retraining via CronJob
+- **Inference API**: FastAPI serves predictions
+- **GitOps**: ArgoCD syncs infrastructure and apps
 
-trains
+## 📦 Usage
 
-loads model
+### Training Models
 
-predicts
+```bash
+# Automated (in-cluster CronJob runs daily)
+kubectl get cronjobs -n anomaly-detection
 
-alerts
-
-syncs
-
-deploys
-
-deploys
-
-Prometheus
-K8s Metrics
-CronJob
-Feature Engineer
-MLflow Registry
-FastAPI
-Anomaly Score
-Alertmanager
-GitHub
-ArgoCD
-📦 Usage
-Training a new model
-bash
-Copy
-# inside cluster (CronJob)
+# Manual training
 kubectl create job --from=cronjob/anomaly-detector-training train-manual
 
-# local (same image)
+# Local training
 make train WINDOW=12
-Deploying to production
-bash
-Copy
+```
+
+### Production Deployment
+
+```bash
+# Azure
 export ARM_SUBSCRIPTION_ID=xxx
 make deploy-infra CLOUD=azure ENV=prod LOCATION=eastus2
 make deploy-app ENV=prod
-Running tests
-bash
-Copy
-tox                  # unit + lint + coverage
-tox -e bats          # integration (needs cluster)
-tox -e locust        # load test
-Port-forward dashboards
-bash
-Copy
-make port-forward-grafana   # http://localhost:3000 (admin/admin)
-make port-forward-argocd    # https://localhost:8080
-make port-forward-mlflow    # http://localhost:5000
-📊 Monitoring
-Grafana dashboards – make open
-Prometheus targets – kubectl get servicemonitor -n monitoring
-Model performance – check MLflow UI & anomaly_detector_inference_duration_seconds metric
-Alert routing – see monitoring/alertmanager/alertmanager-config.yaml
-🔒 Security
-RBAC – per-component ServiceAccounts (see config/kubernetes/rbac.yaml)
-Network policies – deny-all-by-default (see config/kubernetes/network-policy.yaml)
-Secrets – cloud Key-Vaults; never commit secrets
-Image scanning – Trivy in CI (.github/workflows/security-scan.yml)
-🤝 Contributing
-Fork & clone
-make dev-setup
-Create feature branch feat/my-improvement
-Run pre-commit run --all-files
-tox must pass
-Open PR; CI will build & scan
-See Contributing Guide.
-📄 License
-MIT – see LICENSE.
-🏆 Success Stories
-"Reduced PagerDuty alerts by 85% while catching issues 30 min earlier—game changer!"
-— Senior SRE, Fortune 500
-"Predictive scaling saved $50K monthly. ROI was immediate."
-— CTO, Tech Startup
-⭐ Star this repo if it helped!
-Built with ❤️ by the DevOps + AI/ML community.
+
+# AWS
+export AWS_PROFILE=production
+make deploy-infra CLOUD=aws ENV=prod REGION=us-west-2
+make deploy-app ENV=prod
+
+# GCP
+export GOOGLE_PROJECT=my-project
+make deploy-infra CLOUD=gcp ENV=prod REGION=us-central1
+make deploy-app ENV=prod
+```
+
+### Testing
+
+```bash
+# Unit tests + linting
+tox
+
+# Integration tests (requires cluster)
+tox -e bats
+
+# Load testing
+tox -e locust
+```
+
+## 📊 Monitoring
+
+**Grafana Dashboards:**
+- Anomaly Detection Overview
+- Model Performance Metrics
+- Cluster Resource Analysis
+
+**Key Metrics:**
+- `anomaly_detector_inference_duration_seconds` - Inference latency
+- `anomaly_detector_predictions_total` - Total predictions
+- `anomaly_detector_anomalies_detected_total` - Anomaly count
+- `anomaly_detector_model_accuracy` - Model performance
+
+**Alerts:**
+- High anomaly score threshold
+- Model inference failures
+- Training job failures
+
+## 🔒 Security
+
+- **RBAC**: Least-privilege ServiceAccounts per component
+- **Network Policies**: Default deny-all with explicit allow rules
+- **Secrets Management**: Integrates with Azure Key Vault, AWS Secrets Manager, GCP Secret Manager
+- **Image Scanning**: Trivy + Snyk in CI pipeline
+- **Vulnerability Management**: Automated security patches via Renovate
+
+## 🏗️ Repository Structure
+
+```
+├── infrastructure/          # Terraform modules + Helm charts
+│   ├── terraform/          # Multi-cloud IaC
+│   └── helm/               # Anomaly detector + monitoring stack
+├── ml-pipeline/            # Training pipeline
+│   ├── src/ml_pipeline/    # Data collection, feature eng, models
+│   └── notebooks/          # Jupyter notebooks for analysis
+├── src/                    # Production API
+│   ├── anomaly_detector/   # Model serving logic
+│   └── api/                # FastAPI application
+├── argocd/                 # GitOps manifests
+│   ├── applications/       # App-of-Apps pattern
+│   └── applicationsets/    # Multi-environment deployments
+├── monitoring/             # Prometheus rules + Grafana dashboards
+├── scripts/                # Automation scripts
+├── tests/                  # Unit, integration, performance tests
+└── docs/                   # Architecture and usage documentation
+```
+
+## 🤝 Contributing
+
+We welcome contributions! Please follow these steps:
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feat/my-feature`
+3. Make changes and run tests: `make dev-setup && tox`
+4. Run pre-commit hooks: `pre-commit run --all-files`
+5. Submit a pull request
+
+See [CONTRIBUTING.md](docs/development/contributing.md) for detailed guidelines.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🏆 Success Stories
+
+> "Reduced PagerDuty alerts by 85% while catching issues 30 minutes earlier—game changer!"  
+> — Senior SRE, Fortune 500
+
+> "Predictive scaling saved $50K monthly. ROI was immediate."  
+> — CTO, Tech Startup
+
+## 🔗 Resources
+
+- [Architecture Overview](docs/architecture/overview.md)
+- [Production Deployment Guide](docs/deployment/production.md)
+- [API Documentation](docs/api/endpoints.md)
+- [Troubleshooting Guide](docs/deployment/troubleshooting.md)
+
+---
+
+⭐ **Star this repo if it helped you!**
+
+Built with ❤️ by the DevOps + AI/ML community
